@@ -63,7 +63,6 @@ def extract_text_from_file(uploaded_file):
     elif lower_name.endswith(".docx"):
         doc = docx.Document(uploaded_file)
         paragraphs = [p.text.strip() for p in doc.paragraphs if p.text.strip()]
-        # 連同 Word 內的表格一起讀取
         for table in doc.tables:
             for row in table.rows:
                 row_text = " | ".join([cell.text.strip() for cell in row.cells if cell.text.strip()])
@@ -81,12 +80,10 @@ def extract_text_from_file(uploaded_file):
         for i, slide in enumerate(prs.slides):
             slide_texts = []
             for shape in slide.shapes:
-                # 抓取文字框
                 if shape.has_text_frame:
                     for paragraph in shape.text_frame.paragraphs:
                         if paragraph.text.strip():
                             slide_texts.append(paragraph.text.strip())
-                # 抓取簡報內的表格數據
                 if shape.has_table:
                     for row in shape.table.rows:
                         row_text = " | ".join([cell.text.strip() for cell in row.cells if cell.text.strip()])
@@ -124,7 +121,7 @@ def extract_text_from_file(uploaded_file):
             })
     return text_chunks
 
-def search_internal_db(query, db_data, top_k=6):
+def search_internal_db(query, db_data, top_k=8):
     if not db_data:
         return "（目前內部工程資料庫尚無檔案）"
     corpus = [item["content"] for item in db_data]
@@ -135,7 +132,7 @@ def search_internal_db(query, db_data, top_k=6):
     
     results = []
     for idx in top_indices:
-        if cosine_sim[idx] > 0.05:
+        if cosine_sim[idx] > 0.02:
             results.append(f"【來源：{db_data[idx]['source']}】\n{db_data[idx]['content']}")
     return "\n\n---\n\n".join(results) if results else "（內部工程資料庫中未找到高度相關段落）"
 
@@ -189,11 +186,14 @@ if user_query := st.chat_input("請輸入問題（例如：簡報中提到的施
         
     with st.chat_message("assistant"):
         with st.spinner("🔍 正在翻閱工程資料庫並同步搜尋最新外部法規..."):
-            internal_context = search_internal_db(user_query, db_data, top_k=6)
+            internal_context = search_internal_db(user_query, db_data, top_k=8)
             
             system_prompt = f"""
 你是一位專業、嚴謹的「工程專案智囊團 AI 顧問」。
 使用者是工程團隊成員，請根據以下【內部工程資料庫檢索結果】以及【Google 網路搜尋最新法規】來回答問題。
+
+【目前內部資料庫已上傳的文件清單】：
+{", ".join(unique_files) if unique_files else "尚未上傳任何文件"}
 
 【回答嚴格守則】：
 1. 內部資料引用：凡是引用內部工程資料的數據或規定，必須明確標註「【來源：檔名與頁碼/投影片頁數/段落】」。
