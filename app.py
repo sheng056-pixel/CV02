@@ -261,4 +261,4 @@ if user_query := st.chat_input("請輸入問題（例如：cv02工程預算大�
                 answer = f"⚠️ 系統呼叫失敗。錯誤訊息：{last_error}\n\n**解決建議**：若持續出現 `429 RESOURCE_EXHAUSTED`，代表該組 API Key 的免費額度在 Google AI Studio 中被設為 0，請至 [aistudio.google.com/apikey](https://aistudio.google.com/apikey) 點選 **Create API key in new project** 重新產生一組 `AIzaSy` 開頭的金鑰，並更新至 Streamlit 後台的 Secrets 中。"
                 
             st.markdown(answer)
-            st.session_state.messages.append({"role": "assistant", "content": answer
+            st.session_state.messages.append({"role": "assistant", "content": answer})
