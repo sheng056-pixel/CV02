@@ -1,4 +1,5 @@
 import os
+import re
 import streamlit as st
 from google import genai
 from google.genai import types
@@ -11,14 +12,13 @@ from sklearn.metrics.pairwise import cosine_similarity
 import pickle
 
 # ================= 1. 系統基本設定 =================
-st.set_page_config(page_title="工程專案智囊團", page_icon="🏗️", layout="centered")
+st.set_page_config(page_title="工程專案智囊團", page_icon="🏗️", layout="wide")
 
 TEAM_PASSWORD = st.secrets.get("TEAM_PASSWORD", "1234")
 GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY", "").strip()
 
 DB_FILE = "engineering_knowledge_db.pkl"
 
-# 預設兩層資料夾結構 { "第一層主資料夾": ["第二層子資料夾A", "第二層子資料夾B"] }
 DEFAULT_FOLDER_TREE = {
     "01_契約與補充規定": ["主契約條款", "投標須知與特訂條款"],
     "02_施工規範與圖說": ["土建工程規範", "機電工程規範", "職安衛與環保規範"],
@@ -42,16 +42,14 @@ if not st.session_state.authenticated:
             st.error("密碼錯誤，請重新輸入！")
     st.stop()
 
-# ================= 3. 讀取與儲存資料庫 (自動無痛升級雙層結構) =================
+# ================= 3. 讀取與儲存資料庫 =================
 def load_db():
     if os.path.exists(DB_FILE):
         try:
             with open(DB_FILE, "rb") as f:
                 data = pickle.load(f)
-            # 若已經是 v3.0 雙層結構字典
             if isinstance(data, dict) and "folder_tree" in data:
                 return data
-            # 若是 v2.0 單層結構，自動升格為雙層
             elif isinstance(data, dict) and "categories" in data:
                 tree = {cat: ["一般文件"] for cat in data["categories"]}
                 for k, v in DEFAULT_FOLDER_TREE.items():
@@ -70,7 +68,6 @@ def load_db():
                         "content": c["content"]
                     })
                 return {"folder_tree": tree, "chunks": upgraded_chunks}
-            # 若是 v1.0 最早期列表結構
             elif isinstance(data, list):
                 upgraded_chunks = []
                 for item in data:
@@ -192,12 +189,22 @@ def search_internal_db(query, chunks, selected_cat1s, selected_cat2s, top_k=10):
             results.append(f"【路徑：{item['cat1']} > {item['cat2']}｜來源：{item['file_name']} {item['location']}】\n{item['content']}")
     return "\n\n---\n\n".join(results)
 
-# ================= 4. 側邊欄：雙層資料夾管理、檔案改名與上傳 =================
+def highlight_keywords(text, keywords):
+    highlighted = text
+    for kw in keywords:
+        if kw:
+            pattern = re.compile(re.escape(kw), re.IGNORECASE)
+            highlighted = pattern.sub(
+                lambda m: f"<mark style='background-color: #ffe066; padding: 2px 4px; border-radius: 4px; font-weight: bold;'>{m.group(0)}</mark>",
+                highlighted
+            )
+    return highlighted
+
+# ================= 4. 側邊欄：上傳置頂 ＋ 資料夾管理 =================
 db = load_db()
 folder_tree = db["folder_tree"]
 chunks = db["chunks"]
 
-# 整理目前檔案對照表: { file_name: (cat1, cat2) }
 file_info_map = {}
 for c in chunks:
     c1 = c.get("cat1", list(folder_tree.keys())[0])
@@ -209,13 +216,37 @@ for c in chunks:
     file_info_map[c["file_name"]] = (c1, c2)
 
 with st.sidebar:
-    st.header("📂 工程雙層資料庫管理")
+    st.header("📂 工程資料庫控制台")
     st.info(f"目前共 **{len(file_info_map)}** 份文件（共 {len(chunks)} 個檢索區塊）")
     
-    # --- 功能 A：樹狀檢視兩層資料夾與檔案 ---
-    with st.expander("📁 瀏覽兩層資料夾與檔案", expanded=True):
+    # --- 【置頂第 1 順位】上傳工程文件 ---
+    with st.expander("➕ 上傳新工程文件 (點此展開)", expanded=True):
+        up_c1 = st.selectbox("1. 選擇第一層（主資料夾）：", list(folder_tree.keys()))
+        up_c2 = st.selectbox("2. 選擇第二層（子資料夾）：", folder_tree[up_c1])
+        uploaded_files = st.file_uploader(
+            "3. 選擇檔案 (支援 PDF, Word, PPTX, Excel, TXT)", 
+            type=["pdf", "docx", "pptx", "xlsx", "txt"], 
+            accept_multiple_files=True
+        )
+        if st.button("🚀 點此匯入並更新知識庫", type="primary", use_container_width=True):
+            if uploaded_files:
+                with st.spinner("正在解析文件並寫入資料庫..."):
+                    new_count = 0
+                    for uf in uploaded_files:
+                        db["chunks"] = [c for c in db["chunks"] if c["file_name"] != uf.name]
+                        new_chunks = extract_text_from_file(uf, up_c1, up_c2)
+                        db["chunks"].extend(new_chunks)
+                        new_count += 1
+                    save_db(db)
+                    st.success(f"已匯入 {new_count} 份文件至【{up_c1} > {up_c2}】！")
+                    st.rerun()
+            else:
+                st.warning("請先選擇檔案後再按匯入！")
+
+    # --- 第 2 順位：瀏覽兩層資料夾 ---
+    with st.expander("📁 瀏覽兩層資料夾與檔案", expanded=False):
         if not file_info_map:
-            st.caption("目前尚無檔案，請從下方選擇資料夾並上傳。")
+            st.caption("目前尚無檔案。")
         else:
             for c1, sub_list in folder_tree.items():
                 c1_files = [f for f, (f_c1, _) in file_info_map.items() if f_c1 == c1]
@@ -228,10 +259,44 @@ with st.sidebar:
                             for f in c2_files:
                                 st.caption(f"   📄 {f}")
 
-    # --- 功能 B：直接在網頁管理「第一層」與「第二層」資料夾 ---
-    with st.expander("⚙️ 管理兩層資料夾 (新增/改名/刪除)"):
+    # --- 第 3 順位：修改檔名 / 搬移資料夾 / 刪除檔案 ---
+    if file_info_map:
+        with st.expander("✏️ 修改檔名 / 搬移 / 刪除檔案", expanded=False):
+            selected_file = st.selectbox("選擇要編輯的檔案：", sorted(list(file_info_map.keys())))
+            new_file_name = st.text_input("修改檔案顯示名稱：", value=selected_file)
+            
+            curr_c1, curr_c2 = file_info_map[selected_file]
+            c1_list = list(folder_tree.keys())
+            c1_idx = c1_list.index(curr_c1) if curr_c1 in c1_list else 0
+            move_c1 = st.selectbox("搬移至第一層主資料夾：", c1_list, index=c1_idx)
+            
+            c2_list = folder_tree[move_c1]
+            c2_idx = c2_list.index(curr_c2) if curr_c2 in c2_list else 0
+            move_c2 = st.selectbox("搬移至第二層子資料夾：", c2_list, index=c2_idx)
+            
+            b1, b2 = st.columns(2)
+            with b1:
+                if st.button("💾 儲存變更", use_container_width=True):
+                    clean_fname = new_file_name.strip()
+                    if clean_fname:
+                        for c in chunks:
+                            if c["file_name"] == selected_file:
+                                c["file_name"] = clean_fname
+                                c["cat1"] = move_c1
+                                c["cat2"] = move_c2
+                        save_db(db)
+                        st.success("已更新！")
+                        st.rerun()
+            with b2:
+                if st.button("🗑️ 刪除此檔案", use_container_width=True):
+                    db["chunks"] = [c for c in chunks if c["file_name"] != selected_file]
+                    save_db(db)
+                    st.success("已刪除！")
+                    st.rerun()
+
+    # --- 第 4 順位：管理兩層資料夾 ---
+    with st.expander("⚙️ 管理兩層資料夾 (新增/改名)", expanded=False):
         tab1, tab2 = st.tabs(["第一層(主夾)", "第二層(子夾)"])
-        
         with tab1:
             new_c1 = st.text_input("➕ 新增第一層資料夾：", placeholder="例如：06_職安衛與環保")
             if st.button("新增主資料夾", use_container_width=True) and new_c1.strip():
@@ -239,7 +304,6 @@ with st.sidebar:
                 if clean_c1 not in folder_tree:
                     folder_tree[clean_c1] = ["一般文件"]
                     save_db(db)
-                    st.success(f"已建立主資料夾：{clean_c1}")
                     st.rerun()
             st.divider()
             target_c1 = st.selectbox("選擇要改名或刪除的主資料夾：", list(folder_tree.keys()), key="sel_c1")
@@ -249,9 +313,7 @@ with st.sidebar:
                 if st.button("儲存主夾名稱", use_container_width=True):
                     clean_r1 = rename_c1.strip()
                     if clean_r1 and clean_r1 != target_c1:
-                        new_tree = {}
-                        for k, v in folder_tree.items():
-                            new_tree[clean_r1 if k == target_c1 else k] = v
+                        new_tree = { (clean_r1 if k == target_c1 else k): v for k, v in folder_tree.items() }
                         db["folder_tree"] = new_tree
                         for c in chunks:
                             if c.get("cat1") == target_c1:
@@ -262,19 +324,233 @@ with st.sidebar:
                 if st.button("🗑️ 刪除主夾", use_container_width=True):
                     if len(folder_tree) > 1:
                         del folder_tree[target_c1]
-                        fallback_c1 = list(folder_tree.keys())[0]
-                        fallback_c2 = folder_tree[fallback_c1][0]
+                        fb1 = list(folder_tree.keys())[0]
+                        fb2 = folder_tree[fb1][0]
                         for c in chunks:
                             if c.get("cat1") == target_c1:
-                                c["cat1"] = fallback_c1
-                                c["cat2"] = fallback_c2
+                                c["cat1"], c["cat2"] = fb1, fb2
                         save_db(db)
                         st.rerun()
-                    else:
-                        st.warning("至少需保留一個主資料夾！")
-
         with tab2:
-            parent_c1 = st.selectbox("1. 先選擇所屬的「第一層主資料夾」：", list(folder_tree.keys()), key="p_c1")
-            new_c2 = st.text_input("➕ 在此主夾下新增「第二層子資料夾」：", placeholder="例如：高空作業查驗")
+            parent_c1 = st.selectbox("1. 選擇所屬主資料夾：", list(folder_tree.keys()), key="p_c1")
+            new_c2 = st.text_input("➕ 新增第二層子資料夾：", placeholder="例如：高空作業查驗")
             if st.button("新增子資料夾", use_container_width=True) and new_c2.strip():
                 clean_c2 = new_c2.strip()
+                if clean_c2 not in folder_tree[parent_c1]:
+                    folder_tree[parent_c1].append(clean_c2)
+                    save_db(db)
+                    st.rerun()
+            st.divider()
+            target_c2 = st.selectbox("2. 選擇要改名或刪除的子夾：", folder_tree[parent_c1], key="sel_c2")
+            rename_c2 = st.text_input("修改子資料夾名稱：", value=target_c2, key="ren_c2")
+            col_c, col_d = st.columns(2)
+            with col_c:
+                if st.button("儲存子夾名稱", use_container_width=True):
+                    clean_r2 = rename_c2.strip()
+                    if clean_r2 and clean_r2 != target_c2:
+                        idx = folder_tree[parent_c1].index(target_c2)
+                        folder_tree[parent_c1][idx] = clean_r2
+                        for c in chunks:
+                            if c.get("cat1") == parent_c1 and c.get("cat2") == target_c2:
+                                c["cat2"] = clean_r2
+                        save_db(db)
+                        st.rerun()
+            with col_d:
+                if st.button("🗑️ 刪除子夾", use_container_width=True):
+                    if len(folder_tree[parent_c1]) > 1:
+                        folder_tree[parent_c1].remove(target_c2)
+                        fb_sub = folder_tree[parent_c1][0]
+                        for c in chunks:
+                            if c.get("cat1") == parent_c1 and c.get("cat2") == target_c2:
+                                c["cat2"] = fb_sub
+                        save_db(db)
+                        st.rerun()
+
+    st.divider()
+    enable_web_search = st.checkbox("🌐 啟用 Google 即時聯網搜尋", value=False)
+    if os.path.exists(DB_FILE):
+        with open(DB_FILE, "rb") as f:
+            st.download_button(
+                label="📥 下載知識庫備份檔 (.pkl)",
+                data=f,
+                file_name="engineering_knowledge_db.pkl",
+                mime="application/octet-stream",
+                use_container_width=True
+            )
+
+# ================= 5. 主畫面：三大功能分頁 (AI問答 / 專屬搜尋引擎 / 檔案總覽) =================
+st.title("🏗️ 工程文件問答 ＆ 內部檔案搜尋系統")
+
+# 全域資料夾篩選器
+with st.expander("🎯 點此篩選要檢索的「兩層資料夾範圍」（預設搜尋全部資料夾）", expanded=False):
+    col_f1, col_f2 = st.columns(2)
+    with col_f1:
+        selected_cat1s = st.multiselect(
+            "1. 篩選第一層（主資料夾）：",
+            options=list(folder_tree.keys()),
+            default=list(folder_tree.keys())
+        )
+    with col_f2:
+        available_cat2s = []
+        for c1 in selected_cat1s:
+            available_cat2s.extend(folder_tree.get(c1, []))
+        selected_cat2s = st.multiselect(
+            "2. 篩選第二層（子資料夾，留空代表全選）：",
+            options=available_cat2s,
+            default=[]
+        )
+
+# 建立三大主功能分頁
+main_tab1, main_tab2, main_tab3 = st.tabs([
+    "💬 AI 智囊團問答", 
+    "🔎 內部檔案搜尋引擎 (關鍵字秒查)", 
+    "📂 檔案全文檢視器"
+])
+
+# ----------------- 分頁 1：AI 智囊團問答 -----------------
+with main_tab1:
+    if "messages" not in st.session_state:
+        st.session_state.messages = [
+            {"role": "assistant", "content": "你好！我是你們的工程專案智囊團。你可以直接問我**簡報內容、預算金額、施工規範或採購法規**；若只想單純用關鍵字翻找檔案原文，也可以切換到上方第二個**「🔎 內部檔案搜尋引擎」**分頁喔！"}
+        ]
+
+    for msg in st.session_state.messages:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+
+    if user_query := st.chat_input("請輸入問題交給 AI 分析（例如：台中二期議題討論會提到的重點有哪些？）"):
+        st.session_state.messages.append({"role": "user", "content": user_query})
+        with st.chat_message("user"):
+            st.markdown(user_query)
+            
+        with st.chat_message("assistant"):
+            with st.spinner("🔍 正在翻閱工程資料庫並整理答案..."):
+                internal_context = search_internal_db(user_query, db["chunks"], selected_cat1s, selected_cat2s, top_k=10)
+                file_summary = [
+                    f"[{c1} > {c2}] {fname}" 
+                    for fname, (c1, c2) in file_info_map.items() 
+                    if c1 in selected_cat1s and (not selected_cat2s or c2 in selected_cat2s)
+                ]
+                
+                system_prompt = f"""
+你是一位專業、嚴謹的「工程專案智囊團 AI 顧問」。
+請根據以下【內部工程資料庫檢索結果】以及你的營建與政府採購法規知識來回答問題。
+
+【目前檢索範圍內的文件清單】：
+{", ".join(file_summary) if file_summary else "⚠️ 尚未匯入任何文件"}
+
+【回答嚴格守則】：
+1. 內部資料引用：凡是引用內部工程資料的數據或規定，必須明確標註「【路徑：主資料夾 > 子資料夾｜來源：檔名與頁碼/投影片頁數】」。
+2. 分類與新舊版本權重：『03_設計變更與核定公文』效力高於『01_契約與補充規定』；會議簡報請以檔名日期最新者為準。
+3. 法規說明：若問題涉及政府採購法、公共工程委員會規範、建築技術規則或職安法規，請一併提供相關法規依據與條號。
+4. 嚴禁瞎掰：若內部資料庫沒有提到該項工程數據，請誠實告知「目前內部文件未載明」，切勿自行編造。
+
+=== 內部工程資料庫檢索結果 ===
+{internal_context}
+==============================
+
+使用者問題：{user_query}
+"""
+                client = genai.Client(api_key=GEMINI_API_KEY)
+                answer = None
+                models_to_try = ["gemini-3.8-flash", "gemini-2.5-flash-lite", "gemini-2.0-flash"]
+                last_error = ""
+                
+                for model_name in models_to_try:
+                    try:
+                        config_args = {"temperature": 0.2}
+                        if enable_web_search:
+                            config_args["tools"] = [{"google_search": {}}]
+                        response = client.models.generate_content(
+                            model=model_name,
+                            contents=system_prompt,
+                            config=types.GenerateContentConfig(**config_args)
+                        )
+                        answer = response.text
+                        break
+                    except Exception as e:
+                        err_str = str(e)
+                        last_error = err_str
+                        if enable_web_search and "429" in err_str:
+                            try:
+                                response = client.models.generate_content(
+                                    model=model_name,
+                                    contents=system_prompt,
+                                    config=types.GenerateContentConfig(temperature=0.2)
+                                )
+                                answer = response.text + "\n\n*(💡 系統提示：因免費版即時搜尋配額受限，已自動改用「內部工程資料庫 ＋ AI 內建法規知識」回答)*"
+                                break
+                            except Exception as e2:
+                                last_error = str(e2)
+                        continue
+                        
+                if not answer:
+                    answer = f"⚠️ 系統呼叫失敗。錯誤訊息：{last_error}"
+                    
+                st.markdown(answer)
+                st.session_state.messages.append({"role": "assistant", "content": answer})
+
+# ----------------- 分頁 2：專屬內部檔案搜尋引擎 -----------------
+with main_tab2:
+    st.subheader("🔎 內部工程檔案專用搜尋引擎")
+    st.caption("不需消耗 AI 額度，0.1 秒直接搜尋所有 PDF、Word、PPT、Excel 內文與檔名，並將關鍵字螢光筆標示！")
+    
+    col_s1, col_s2 = st.columns([3, 1])
+    with col_s1:
+        search_kw = st.text_input(
+            "請輸入搜尋關鍵字（多個關鍵字可用空白隔開，例如：台中二期 水工 進度）：", 
+            placeholder="輸入關鍵字後按 Enter 即可立即搜尋..."
+        )
+    with col_s2:
+        match_mode = st.radio("多關鍵字匹配模式：", ["包含任一關鍵字 (OR)", "必須包含全部 (AND)"], horizontal=False)
+
+    if search_kw.strip():
+        keywords = [k.strip() for k in search_kw.strip().split() if k.strip()]
+        matched_results = []
+        
+        for c in chunks:
+            if c.get("cat1") not in selected_cat1s:
+                continue
+            if selected_cat2s and c.get("cat2") not in selected_cat2s:
+                continue
+                
+            target_text = f"{c['file_name']} {c['content']}".lower()
+            if match_mode == "必須包含全部 (AND)":
+                is_match = all(k.lower() in target_text for k in keywords)
+            else:
+                is_match = any(k.lower() in target_text for k in keywords)
+                
+            if is_match:
+                hit_count = sum(target_text.count(k.lower()) for k in keywords)
+                matched_results.append((hit_count, c))
+                
+        # 依照關鍵字出現次數由高到低排序
+        matched_results.sort(key=lambda x: x[0], reverse=True)
+        
+        st.success(f"🎯 共找到 **{len(matched_results)}** 個包含關鍵字【{'、'.join(keywords)}】的文件段落！")
+        
+        for idx, (hits, item) in enumerate(matched_results, 1):
+            with st.container(border=True):
+                st.markdown(
+                    f"**#{idx}｜🗂️ `{item['cat1']} > {item['cat2']}` ｜ 📄 `{item['file_name']}` {item['location']}** "
+                    f"*(命中 {hits} 次)*"
+                )
+                highlighted_html = highlight_keywords(item["content"], keywords).replace("\n", "<br>")
+                st.markdown(f"<div style='font-size: 0.95rem; line-height: 1.6;'>{highlighted_html}</div>", unsafe_allow_html=True)
+    else:
+        st.info("👆 請在上方輸入任何關鍵字（例如：工程名稱、材料規格、文號、金額），系統會立刻幫你把所有相關頁數翻出來！")
+
+# ----------------- 分頁 3：檔案全文檢視器 -----------------
+with main_tab3:
+    st.subheader("📂 已匯入工程檔案全文檢視")
+    if not file_info_map:
+        st.warning("目前資料庫中尚無檔案，請從左側邊欄最上方上傳檔案。")
+    else:
+        view_file = st.selectbox("選擇要直接閱讀全文的檔案：", sorted(list(file_info_map.keys())))
+        v_c1, v_c2 = file_info_map[view_file]
+        st.caption(f"目前所在資料夾路徑：**{v_c1} > {v_c2}**")
+        
+        file_chunks = [c for c in chunks if c["file_name"] == view_file]
+        for fc in file_chunks:
+            with st.expander(f"📄 {fc['file_name']} — {fc['location']}", expanded=True):
+                st.text(fc["content"])
