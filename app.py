@@ -4,6 +4,8 @@ from google import genai
 from google.genai import types
 import pypdf
 import docx
+from pptx import Presentation
+import openpyxl
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 import pickle
@@ -45,8 +47,10 @@ def save_db(data):
 def extract_text_from_file(uploaded_file):
     text_chunks = []
     filename = uploaded_file.name
+    lower_name = filename.lower()
     
-    if filename.endswith(".pdf"):
+    # 1. 讀取 PDF
+    if lower_name.endswith(".pdf"):
         reader = pypdf.PdfReader(uploaded_file)
         for i, page in enumerate(reader.pages):
             page_text = page.extract_text()
@@ -55,15 +59,63 @@ def extract_text_from_file(uploaded_file):
                     "source": f"{filename} (第 {i+1} 頁)",
                     "content": page_text.strip()
                 })
-    elif filename.endswith(".docx"):
+    # 2. 讀取 Word (.docx)
+    elif lower_name.endswith(".docx"):
         doc = docx.Document(uploaded_file)
-        full_text = "\n".join([p.text for p in doc.paragraphs if p.text.strip()])
+        paragraphs = [p.text.strip() for p in doc.paragraphs if p.text.strip()]
+        # 連同 Word 內的表格一起讀取
+        for table in doc.tables:
+            for row in table.rows:
+                row_text = " | ".join([cell.text.strip() for cell in row.cells if cell.text.strip()])
+                if row_text:
+                    paragraphs.append(row_text)
+        full_text = "\n".join(paragraphs)
         for i in range(0, len(full_text), 800):
             text_chunks.append({
                 "source": f"{filename} (段落 {i//800 + 1})",
                 "content": full_text[i:i+800]
             })
-    elif filename.endswith(".txt"):
+    # 3. 讀取 PowerPoint 簡報 (.pptx)
+    elif lower_name.endswith(".pptx"):
+        prs = Presentation(uploaded_file)
+        for i, slide in enumerate(prs.slides):
+            slide_texts = []
+            for shape in slide.shapes:
+                # 抓取文字框
+                if shape.has_text_frame:
+                    for paragraph in shape.text_frame.paragraphs:
+                        if paragraph.text.strip():
+                            slide_texts.append(paragraph.text.strip())
+                # 抓取簡報內的表格數據
+                if shape.has_table:
+                    for row in shape.table.rows:
+                        row_text = " | ".join([cell.text.strip() for cell in row.cells if cell.text.strip()])
+                        if row_text:
+                            slide_texts.append(row_text)
+            if slide_texts:
+                text_chunks.append({
+                    "source": f"{filename} (投影片第 {i+1} 頁)",
+                    "content": "\n".join(slide_texts)
+                })
+    # 4. 讀取 Excel 表格 (.xlsx)
+    elif lower_name.endswith(".xlsx"):
+        wb = openpyxl.load_workbook(uploaded_file, data_only=True)
+        for sheet in wb.sheetnames:
+            ws = wb[sheet]
+            rows_text = []
+            for row in ws.iter_rows(values_only=True):
+                row_vals = [str(cell).strip() for cell in row if cell is not None and str(cell).strip()]
+                if row_vals:
+                    rows_text.append(" | ".join(row_vals))
+            full_sheet_text = "\n".join(rows_text)
+            for i in range(0, len(full_sheet_text), 800):
+                if full_sheet_text[i:i+800].strip():
+                    text_chunks.append({
+                        "source": f"{filename} (工作表:{sheet} 區塊{i//800 + 1})",
+                        "content": full_sheet_text[i:i+800]
+                    })
+    # 5. 讀取純文字 (.txt)
+    elif lower_name.endswith(".txt"):
         full_text = uploaded_file.read().decode("utf-8", errors="ignore")
         for i in range(0, len(full_text), 800):
             text_chunks.append({
@@ -89,7 +141,7 @@ def search_internal_db(query, db_data, top_k=6):
 
 # ================= 4. 主畫面與檔案管理側邊欄 =================
 st.title("🏗️ 工程文件問答＆法規智囊團")
-st.caption("同時檢索「內部工程契約/規範/會議紀錄」與「Google 最新外部營建採購法規」")
+st.caption("同時檢索「內部工程契約/規範/簡報/會議紀錄」與「Google 最新外部營建採購法規」")
 
 db_data = load_db()
 
@@ -104,8 +156,8 @@ with st.sidebar:
             
     st.subheader("➕ 新增工程文件 (無上限)")
     uploaded_files = st.file_uploader(
-        "上傳契約、施工規範、會議紀錄或公文 (支援 PDF, Word, TXT)", 
-        type=["pdf", "docx", "txt"], 
+        "上傳契約、規範、簡報或報表 (支援 PDF, Word, PPTX, Excel, TXT)", 
+        type=["pdf", "docx", "pptx", "xlsx", "txt"], 
         accept_multiple_files=True
     )
     if st.button("匯入並更新知識庫", use_container_width=True) and uploaded_files:
@@ -123,14 +175,14 @@ with st.sidebar:
 # ================= 5. 雙軌智慧問答區 =================
 if "messages" not in st.session_state:
     st.session_state.messages = [
-        {"role": "assistant", "content": "你好！我是你們的工程專案智囊團。你可以直接問我**契約規範、驗收標準、歷次會議紀錄**，或是叫我幫你**上網比對最新的政府採購法與公共工程規範**！"}
+        {"role": "assistant", "content": "你好！我是你們的工程專案智囊團。你可以直接問我**契約規範、簡報內容、驗收標準、歷次會議紀錄**，或是叫我幫你**上網比對最新的政府採購法與公共工程規範**！"}
     ]
 
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
-if user_query := st.chat_input("請輸入問題（例如：本案混凝土坍度規定為何？並查最新法規標準）"):
+if user_query := st.chat_input("請輸入問題（例如：簡報中提到的施工進度為何？並查最新法規標準）"):
     st.session_state.messages.append({"role": "user", "content": user_query})
     with st.chat_message("user"):
         st.markdown(user_query)
@@ -144,7 +196,7 @@ if user_query := st.chat_input("請輸入問題（例如：本案混凝土坍度
 使用者是工程團隊成員，請根據以下【內部工程資料庫檢索結果】以及【Google 網路搜尋最新法規】來回答問題。
 
 【回答嚴格守則】：
-1. 內部資料引用：凡是引用內部工程資料的數據或規定，必須明確標註「【來源：檔名與頁碼/段落】」。
+1. 內部資料引用：凡是引用內部工程資料的數據或規定，必須明確標註「【來源：檔名與頁碼/投影片頁數/段落】」。
 2. 新舊版本覆蓋原則：若內部多份文件出現規定衝突（例如原契約 vs 變更設計、早期會議 vs 最新會議紀錄），請務必以「檔名日期最新、或屬於變更設計/最新核定公文」的內容為準，並主動提醒使用者新舊版本的差異。
 3. 外部法規查詢：若問題涉及政府採購法、公共工程委員會規範、建築技術規則、職安法規或一般工程標準，請務必啟動 Google Search 查詢最新法規，並標明法規名稱與條號。
 4. 嚴禁瞎掰：若內部資料庫沒有提到、網路上也查無相關標準，請誠實告知「目前內部文件未載明」，切勿自行編造工程數據。
