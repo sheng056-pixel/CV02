@@ -18,7 +18,16 @@ GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY", "").strip()
 
 DB_FILE = "engineering_knowledge_db.pkl"
 
-# ================= 2. 密碼驗證機制 (手機介面友善) =================
+# 預設兩層資料夾結構 { "第一層主資料夾": ["第二層子資料夾A", "第二層子資料夾B"] }
+DEFAULT_FOLDER_TREE = {
+    "01_契約與補充規定": ["主契約條款", "投標須知與特訂條款"],
+    "02_施工規範與圖說": ["土建工程規範", "機電工程規範", "職安衛與環保規範"],
+    "03_設計變更與核定公文": ["契約變更設計", "重要往來公文"],
+    "04_會議紀錄與簡報": ["工務會議紀錄", "專案進度簡報"],
+    "05_材料送審與查驗紀錄": ["材料送審資料", "現場查驗與自主檢查"]
+}
+
+# ================= 2. 密碼驗證機制 =================
 if "authenticated" not in st.session_state:
     st.session_state.authenticated = False
 
@@ -33,33 +42,70 @@ if not st.session_state.authenticated:
             st.error("密碼錯誤，請重新輸入！")
     st.stop()
 
-# ================= 3. 讀取與儲存工程資料庫 =================
+# ================= 3. 讀取與儲存資料庫 (自動無痛升級雙層結構) =================
 def load_db():
     if os.path.exists(DB_FILE):
-        with open(DB_FILE, "rb") as f:
-            return pickle.load(f)
-    return []
+        try:
+            with open(DB_FILE, "rb") as f:
+                data = pickle.load(f)
+            # 若已經是 v3.0 雙層結構字典
+            if isinstance(data, dict) and "folder_tree" in data:
+                return data
+            # 若是 v2.0 單層結構，自動升格為雙層
+            elif isinstance(data, dict) and "categories" in data:
+                tree = {cat: ["一般文件"] for cat in data["categories"]}
+                for k, v in DEFAULT_FOLDER_TREE.items():
+                    if k not in tree:
+                        tree[k] = v.copy()
+                upgraded_chunks = []
+                for c in data.get("chunks", []):
+                    cat = c.get("category", "04_會議紀錄與簡報")
+                    if cat not in tree:
+                        tree[cat] = ["一般文件"]
+                    upgraded_chunks.append({
+                        "file_name": c["file_name"],
+                        "cat1": cat,
+                        "cat2": tree[cat][0],
+                        "location": c.get("location", ""),
+                        "content": c["content"]
+                    })
+                return {"folder_tree": tree, "chunks": upgraded_chunks}
+            # 若是 v1.0 最早期列表結構
+            elif isinstance(data, list):
+                upgraded_chunks = []
+                for item in data:
+                    fname = item["source"].split(" (")[0]
+                    loc = item["source"][len(fname):].strip()
+                    upgraded_chunks.append({
+                        "file_name": fname,
+                        "cat1": "04_會議紀錄與簡報",
+                        "cat2": "專案進度簡報",
+                        "location": loc,
+                        "content": item["content"]
+                    })
+                return {"folder_tree": DEFAULT_FOLDER_TREE.copy(), "chunks": upgraded_chunks}
+        except Exception:
+            pass
+    return {"folder_tree": DEFAULT_FOLDER_TREE.copy(), "chunks": []}
 
-def save_db(data):
+def save_db(db_dict):
     with open(DB_FILE, "wb") as f:
-        pickle.dump(data, f)
+        pickle.dump(db_dict, f)
 
-def extract_text_from_file(uploaded_file):
+def extract_text_from_file(uploaded_file, cat1, cat2):
     text_chunks = []
     filename = uploaded_file.name
     lower_name = filename.lower()
     
-    # 1. 讀取 PDF
     if lower_name.endswith(".pdf"):
         reader = pypdf.PdfReader(uploaded_file)
         for i, page in enumerate(reader.pages):
             page_text = page.extract_text()
             if page_text and page_text.strip():
                 text_chunks.append({
-                    "source": f"{filename} (第 {i+1} 頁)",
-                    "content": page_text.strip()
+                    "file_name": filename, "cat1": cat1, "cat2": cat2,
+                    "location": f"(第 {i+1} 頁)", "content": page_text.strip()
                 })
-    # 2. 讀取 Word (.docx)
     elif lower_name.endswith(".docx"):
         doc = docx.Document(uploaded_file)
         paragraphs = [p.text.strip() for p in doc.paragraphs if p.text.strip()]
@@ -71,10 +117,9 @@ def extract_text_from_file(uploaded_file):
         full_text = "\n".join(paragraphs)
         for i in range(0, len(full_text), 800):
             text_chunks.append({
-                "source": f"{filename} (段落 {i//800 + 1})",
-                "content": full_text[i:i+800]
+                "file_name": filename, "cat1": cat1, "cat2": cat2,
+                "location": f"(段落 {i//800 + 1})", "content": full_text[i:i+800]
             })
-    # 3. 讀取 PowerPoint 簡報 (.pptx)
     elif lower_name.endswith(".pptx"):
         prs = Presentation(uploaded_file)
         for i, slide in enumerate(prs.slides):
@@ -91,10 +136,9 @@ def extract_text_from_file(uploaded_file):
                             slide_texts.append(row_text)
             if slide_texts:
                 text_chunks.append({
-                    "source": f"{filename} (投影片第 {i+1} 頁)",
-                    "content": "\n".join(slide_texts)
+                    "file_name": filename, "cat1": cat1, "cat2": cat2,
+                    "location": f"(投影片第 {i+1} 頁)", "content": "\n".join(slide_texts)
                 })
-    # 4. 讀取 Excel 表格 (.xlsx)
     elif lower_name.endswith(".xlsx"):
         wb = openpyxl.load_workbook(uploaded_file, data_only=True)
         for sheet in wb.sheetnames:
@@ -108,23 +152,30 @@ def extract_text_from_file(uploaded_file):
             for i in range(0, len(full_sheet_text), 800):
                 if full_sheet_text[i:i+800].strip():
                     text_chunks.append({
-                        "source": f"{filename} (工作表:{sheet} 區塊{i//800 + 1})",
-                        "content": full_sheet_text[i:i+800]
+                        "file_name": filename, "cat1": cat1, "cat2": cat2,
+                        "location": f"(工作表:{sheet} 區塊{i//800 + 1})", "content": full_sheet_text[i:i+800]
                     })
-    # 5. 讀取純文字 (.txt)
     elif lower_name.endswith(".txt"):
         full_text = uploaded_file.read().decode("utf-8", errors="ignore")
         for i in range(0, len(full_text), 800):
             text_chunks.append({
-                "source": f"{filename} (段落 {i//800 + 1})",
-                "content": full_text[i:i+800]
+                "file_name": filename, "cat1": cat1, "cat2": cat2,
+                "location": f"(段落 {i//800 + 1})", "content": full_text[i:i+800]
             })
     return text_chunks
 
-def search_internal_db(query, db_data, top_k=10):
-    if not db_data:
-        return "（目前內部工程資料庫尚無檔案，請先從左側邊欄上傳檔案並點選『匯入並更新知識庫』）"
-    corpus = [item["content"] for item in db_data]
+def search_internal_db(query, chunks, selected_cat1s, selected_cat2s, top_k=10):
+    if not chunks:
+        return "（目前內部工程資料庫尚無檔案，請先從左側邊欄上傳檔案）"
+    
+    filtered_chunks = [
+        c for c in chunks 
+        if c.get("cat1") in selected_cat1s and (not selected_cat2s or c.get("cat2") in selected_cat2s)
+    ]
+    if not filtered_chunks:
+        return "（目前勾選的資料夾範圍內尚無任何文件）"
+        
+    corpus = [f"{item['file_name']} {item['content']}" for item in filtered_chunks]
     vectorizer = TfidfVectorizer(analyzer="char_wb", ngram_range=(2, 4))
     tfidf_matrix = vectorizer.fit_transform(corpus + [query])
     cosine_sim = cosine_similarity(tfidf_matrix[-1], tfidf_matrix[:-1]).flatten()
@@ -133,132 +184,97 @@ def search_internal_db(query, db_data, top_k=10):
     results = []
     for idx in top_indices:
         if cosine_sim[idx] > 0.01:
-            results.append(f"【來源：{db_data[idx]['source']}】\n{db_data[idx]['content']}")
-    # 若關鍵字沒有完全命中，至少提供前 5 個段落供 AI 參考
+            item = filtered_chunks[idx]
+            results.append(f"【路徑：{item['cat1']} > {item['cat2']}｜來源：{item['file_name']} {item['location']}】\n{item['content']}")
     if not results:
-        for idx in range(min(5, len(db_data))):
-            results.append(f"【來源：{db_data[idx]['source']}】\n{db_data[idx]['content']}")
+        for idx in range(min(5, len(filtered_chunks))):
+            item = filtered_chunks[idx]
+            results.append(f"【路徑：{item['cat1']} > {item['cat2']}｜來源：{item['file_name']} {item['location']}】\n{item['content']}")
     return "\n\n---\n\n".join(results)
 
-# ================= 4. 主畫面與檔案管理側邊欄 =================
-st.title("🏗️ 工程文件問答＆法規智囊團")
-st.caption("同時檢索「內部工程契約/規範/簡報/會議紀錄」與「營建採購法規」")
+# ================= 4. 側邊欄：雙層資料夾管理、檔案改名與上傳 =================
+db = load_db()
+folder_tree = db["folder_tree"]
+chunks = db["chunks"]
 
-db_data = load_db()
+# 整理目前檔案對照表: { file_name: (cat1, cat2) }
+file_info_map = {}
+for c in chunks:
+    c1 = c.get("cat1", list(folder_tree.keys())[0])
+    if c1 not in folder_tree:
+        folder_tree[c1] = ["預設子夾"]
+    c2 = c.get("cat2", folder_tree[c1][0])
+    if c2 not in folder_tree[c1]:
+        folder_tree[c1].append(c2)
+    file_info_map[c["file_name"]] = (c1, c2)
 
 with st.sidebar:
-    st.header("📂 工程資料庫管理")
-    unique_files = sorted(list(set([item["source"].split(" (")[0] for item in db_data])))
-    st.info(f"目前庫內共有 **{len(unique_files)}** 份文件（共 {len(db_data)} 個檢索區塊）")
+    st.header("📂 工程雙層資料庫管理")
+    st.info(f"目前共 **{len(file_info_map)}** 份文件（共 {len(chunks)} 個檢索區塊）")
     
-    with st.expander("查看已匯入的文件清單"):
-        if unique_files:
-            for f in unique_files:
-                st.write(f"📄 {f}")
+    # --- 功能 A：樹狀檢視兩層資料夾與檔案 ---
+    with st.expander("📁 瀏覽兩層資料夾與檔案", expanded=True):
+        if not file_info_map:
+            st.caption("目前尚無檔案，請從下方選擇資料夾並上傳。")
         else:
-            st.write("尚無檔案")
-            
-    st.subheader("➕ 新增工程文件 (無上限)")
-    uploaded_files = st.file_uploader(
-        "1. 先選擇檔案 (支援 PDF, Word, PPTX, Excel, TXT)", 
-        type=["pdf", "docx", "pptx", "xlsx", "txt"], 
-        accept_multiple_files=True
-    )
-    if st.button("2. 點此匯入並更新知識庫", type="primary", use_container_width=True):
-        if uploaded_files:
-            with st.spinner("正在解析文件並寫入資料庫..."):
-                new_count = 0
-                for uf in uploaded_files:
-                    db_data = [item for item in db_data if not item["source"].startswith(uf.name + " (")]
-                    chunks = extract_text_from_file(uf)
-                    db_data.extend(chunks)
-                    new_count += 1
-                save_db(db_data)
-                st.success(f"成功匯入 {new_count} 份工程文件！")
-                st.rerun()
-        else:
-            st.warning("請先在上方選擇檔案後再按匯入！")
-            
-    st.divider()
-    enable_web_search = st.checkbox("🌐 啟用 Google 即時聯網搜尋", value=False, help="若免費 API 額度受限，建議關閉此選項，僅使用內部資料庫與 AI 內建法規知識。")
+            for c1, sub_list in folder_tree.items():
+                c1_files = [f for f, (f_c1, _) in file_info_map.items() if f_c1 == c1]
+                if c1_files:
+                    st.markdown(f"**🗂️ {c1}**")
+                    for c2 in sub_list:
+                        c2_files = sorted([f for f, (f_c1, f_c2) in file_info_map.items() if f_c1 == c1 and f_c2 == c2])
+                        if c2_files:
+                            st.markdown(f" └ 📂 **{c2}** ({len(c2_files)})")
+                            for f in c2_files:
+                                st.caption(f"   📄 {f}")
 
-# ================= 5. 雙軌智慧問答區 =================
-if "messages" not in st.session_state:
-    st.session_state.messages = [
-        {"role": "assistant", "content": "你好！我是你們的工程專案智囊團。請先從**左側邊欄上傳工程檔案並按下「匯入並更新知識庫」**，接著就可以直接問我簡報內容、預算金額、契約規範或採購法規囉！"}
-    ]
-
-for msg in st.session_state.messages:
-    with st.chat_message(msg["role"]):
-        st.markdown(msg["content"])
-
-if user_query := st.chat_input("請輸入問題（例如：cv02工程預算大概是多少錢？）"):
-    st.session_state.messages.append({"role": "user", "content": user_query})
-    with st.chat_message("user"):
-        st.markdown(user_query)
+    # --- 功能 B：直接在網頁管理「第一層」與「第二層」資料夾 ---
+    with st.expander("⚙️ 管理兩層資料夾 (新增/改名/刪除)"):
+        tab1, tab2 = st.tabs(["第一層(主夾)", "第二層(子夾)"])
         
-    with st.chat_message("assistant"):
-        with st.spinner("🔍 正在翻閱工程資料庫並整理答案..."):
-            internal_context = search_internal_db(user_query, db_data, top_k=10)
-            
-            system_prompt = f"""
-你是一位專業、嚴謹的「工程專案智囊團 AI 顧問」。
-使用者是工程團隊成員，請根據以下【內部工程資料庫檢索結果】以及你的營建與政府採購法規知識來回答問題。
+        with tab1:
+            new_c1 = st.text_input("➕ 新增第一層資料夾：", placeholder="例如：06_職安衛與環保")
+            if st.button("新增主資料夾", use_container_width=True) and new_c1.strip():
+                clean_c1 = new_c1.strip()
+                if clean_c1 not in folder_tree:
+                    folder_tree[clean_c1] = ["一般文件"]
+                    save_db(db)
+                    st.success(f"已建立主資料夾：{clean_c1}")
+                    st.rerun()
+            st.divider()
+            target_c1 = st.selectbox("選擇要改名或刪除的主資料夾：", list(folder_tree.keys()), key="sel_c1")
+            rename_c1 = st.text_input("修改主資料夾名稱：", value=target_c1, key="ren_c1")
+            col_a, col_b = st.columns(2)
+            with col_a:
+                if st.button("儲存主夾名稱", use_container_width=True):
+                    clean_r1 = rename_c1.strip()
+                    if clean_r1 and clean_r1 != target_c1:
+                        new_tree = {}
+                        for k, v in folder_tree.items():
+                            new_tree[clean_r1 if k == target_c1 else k] = v
+                        db["folder_tree"] = new_tree
+                        for c in chunks:
+                            if c.get("cat1") == target_c1:
+                                c["cat1"] = clean_r1
+                        save_db(db)
+                        st.rerun()
+            with col_b:
+                if st.button("🗑️ 刪除主夾", use_container_width=True):
+                    if len(folder_tree) > 1:
+                        del folder_tree[target_c1]
+                        fallback_c1 = list(folder_tree.keys())[0]
+                        fallback_c2 = folder_tree[fallback_c1][0]
+                        for c in chunks:
+                            if c.get("cat1") == target_c1:
+                                c["cat1"] = fallback_c1
+                                c["cat2"] = fallback_c2
+                        save_db(db)
+                        st.rerun()
+                    else:
+                        st.warning("至少需保留一個主資料夾！")
 
-【目前內部資料庫已上傳的文件清單】：
-{", ".join(unique_files) if unique_files else "⚠️ 尚未匯入任何文件（使用者可能選了檔案但忘記按『匯入並更新知識庫』按鈕）"}
-
-【回答嚴格守則】：
-1. 內部資料引用：凡是引用內部工程資料的數據或規定，必須明確標註「【來源：檔名與頁碼/投影片頁數/段落】」。
-2. 新舊版本覆蓋原則：若內部多份文件出現規定衝突（例如原契約 vs 變更設計、早期會議 vs 最新會議紀錄），請務必以「檔名日期最新、或屬於變更設計/最新核定公文」的內容為準，並主動提醒使用者新舊版本的差異。
-3. 法規說明：若問題涉及政府採購法、公共工程委員會規範、建築技術規則或職安法規，請一併提供相關法規依據與條號。
-4. 嚴禁瞎掰：若內部資料庫沒有提到該項工程數據，請誠實告知「目前內部文件未載明」，切勿自行編造工程預算或規範數據。
-
-=== 內部工程資料庫檢索結果 ===
-{internal_context}
-==============================
-
-使用者問題：{user_query}
-"""
-            client = genai.Client(api_key=GEMINI_API_KEY)
-            answer = None
-            
-            # 自動嘗試多個可用模型，並自動處理免費版聯網搜尋配額限制 (429)
-            models_to_try = ["gemini-3.8-flash", "gemini-2.5-flash-lite", "gemini-2.0-flash"]
-            last_error = ""
-            
-            for model_name in models_to_try:
-                try:
-                    config_args = {"temperature": 0.2}
-                    if enable_web_search:
-                        config_args["tools"] = [{"google_search": {}}]
-                        
-                    response = client.models.generate_content(
-                        model=model_name,
-                        contents=system_prompt,
-                        config=types.GenerateContentConfig(**config_args)
-                    )
-                    answer = response.text
-                    break
-                except Exception as e:
-                    err_str = str(e)
-                    last_error = err_str
-                    # 如果是開啟聯網搜尋導致 429 額度不足，自動關閉聯網搜尋再重試一次該模型！
-                    if enable_web_search and "429" in err_str:
-                        try:
-                            response = client.models.generate_content(
-                                model=model_name,
-                                contents=system_prompt,
-                                config=types.GenerateContentConfig(temperature=0.2)
-                            )
-                            answer = response.text + "\n\n*(💡 系統提示：因免費版 API 之 Google 即時搜尋配額受限，本次回答已自動改為使用「內部工程資料庫 ＋ AI 內建法規知識庫」生成)*"
-                            break
-                        except Exception as e2:
-                            last_error = str(e2)
-                    continue
-                    
-            if not answer:
-                answer = f"⚠️ 系統呼叫失敗。錯誤訊息：{last_error}\n\n**解決建議**：若持續出現 `429 RESOURCE_EXHAUSTED`，代表該組 API Key 的免費額度在 Google AI Studio 中被設為 0，請至 [aistudio.google.com/apikey](https://aistudio.google.com/apikey) 點選 **Create API key in new project** 重新產生一組 `AIzaSy` 開頭的金鑰，並更新至 Streamlit 後台的 Secrets 中。"
-                
-            st.markdown(answer)
-            st.session_state.messages.append({"role": "assistant", "content": answer})
+        with tab2:
+            parent_c1 = st.selectbox("1. 先選擇所屬的「第一層主資料夾」：", list(folder_tree.keys()), key="p_c1")
+            new_c2 = st.text_input("➕ 在此主夾下新增「第二層子資料夾」：", placeholder="例如：高空作業查驗")
+            if st.button("新增子資料夾", use_container_width=True) and new_c2.strip():
+                clean_c2 = new_c2.strip()
