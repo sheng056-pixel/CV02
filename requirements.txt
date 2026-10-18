@@ -3,3 +3,5 @@ google-genai
 pypdf
 python-docx
 scikit-learn
+python-pptx
+openpyxl
