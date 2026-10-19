@@ -16,7 +16,6 @@ from sklearn.metrics.pairwise import cosine_similarity
 # ================= 1. 系統基本設定與緊湊型 UI 樣式 =================
 st.set_page_config(page_title="CV02 工程助手", page_icon="🏗️", layout="wide")
 
-# 讓左側目錄按鈕與摺疊選單更緊湊俐落
 st.markdown("""
 <style>
 div[data-testid="stSidebar"] div.stButton > button {
@@ -33,10 +32,8 @@ TEAM_PASSWORD = st.secrets.get("TEAM_PASSWORD", "1234")
 GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY", "").strip()
 DB_FILE = "engineering_knowledge_db.pkl"
 
-# 最新 Gemini 3 系列模型優先順序清單
 AVAILABLE_MODELS = ["gemini-3.5-flash-lite", "gemini-3.8-flash", "gemini-3.5-flash"]
 
-# 預設三層資料夾結構：{ 主夾(c1): { 次夾(c2): [細夾(c3), ...] } }
 DEFAULT_FOLDER_TREE_V7 = {
     "01_招標文件與契約": {
         "第一次公告版本": ["契約條款", "投標與評選須知", "施工規範與圖說"],
@@ -89,7 +86,6 @@ def make_token(username, password):
     raw = f"{username}:{password}:cv02_salt"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
-# ================= 2. 資料庫讀取與自動無痛升級三層結構 =================
 def ensure_three_level_tree(raw_tree):
     new_tree = {}
     for c1, val in raw_tree.items():
@@ -153,7 +149,6 @@ def save_db(db_dict):
 db = load_db()
 users_db = db["users"]
 
-# ================= 3. 組員登入 & 同裝置自動記憶 =================
 if "current_user" not in st.session_state:
     st.session_state.current_user = None
 
@@ -186,7 +181,6 @@ if not st.session_state.current_user:
 
 current_user = st.session_state.current_user
 
-# ================= 4. 匯入成功彈出式通知視窗 (Modal Dialog) =================
 @st.dialog("🎉 檔案匯入成功！")
 def show_upload_success_dialog(info):
     st.success(f"✅ 已成功將 **{info['count']}** 份檔案寫入工程資料庫！")
@@ -203,7 +197,6 @@ def show_upload_success_dialog(info):
 if st.session_state.get("upload_notice"):
     show_upload_success_dialog(st.session_state.upload_notice)
 
-# ================= 5. 視覺 OCR 辨識與文件解析引擎 (含三層路徑 & 表頭保留) =================
 def ocr_with_gemini(file_bytes, mime_type):
     if not GEMINI_API_KEY:
         return ""
@@ -366,12 +359,26 @@ def extract_text_from_file(uploaded_file, cat1, cat2, cat3, uploader, enable_ocr
 
     return text_chunks, 0
 
-# ================= 6. 智慧檢索演算法 (含同義詞擴充 & 全量統計模式) =================
+# ================= 6. 全工項動態智慧聯想引擎 =================
 def expand_query_with_synonyms(query):
     expanded = query
     for key, syns in ENGINEERING_SYNONYMS.items():
         if key in query:
             expanded += " " + " ".join(syns)
+    
+    # 動態 AI 智慧擴展：針對使用者輸入的工項、材料或設備自動聯想相關同義詞與細項
+    if GEMINI_API_KEY and len(query.strip()) <= 20:
+        try:
+            client = genai.Client(api_key=GEMINI_API_KEY)
+            res = client.models.generate_content(
+                model="gemini-3.5-flash-lite",
+                contents=f"請針對工程合約與詳細價目表中的查詢詞『{query}』，列出 3 至 5 個常見的工程同義詞、細部規格或相關工項名稱（例如查管子可聯想 PVC, PE, 鋼管, 排水管；查拆除可聯想打除, 拔除, 既有結構）。請直接用空白隔開輸出這些詞彙，不要輸出其他多餘文字。",
+                config=types.GenerateContentConfig(temperature=0.1)
+            )
+            if res and res.text:
+                expanded += " " + res.text.strip().replace("\n", " ")
+        except Exception:
+            pass
     return expanded
 
 def search_internal_db(query, chunks, selected_cat1s, selected_cat2s, selected_cat3s):
@@ -387,9 +394,9 @@ def search_internal_db(query, chunks, selected_cat1s, selected_cat2s, selected_c
     if not filtered_chunks:
         return "（目前勾選的資料夾範圍內尚無文件）"
 
-    deep_keywords = ["日期", "天數", "幾天", "所有", "全部", "統計", "歷次", "決議", "何時", "什麼時候", "要徑", "浮時", "浮實", "日報", "里程碑", "分項"]
+    deep_keywords = ["日期", "天數", "幾天", "所有", "全部", "統計", "歷次", "決議", "何時", "什麼時候", "要徑", "浮時", "浮實", "日報", "里程碑", "分項", "價目表", "工項", "單價", "拔除", "管"]
     is_deep_search = any(k in query for k in deep_keywords)
-    top_k = 100 if is_deep_search else 20
+    top_k = 120 if is_deep_search else 25
 
     expanded_query = expand_query_with_synonyms(query)
     corpus = [f"{item['file_name']} {item['cat2']} {item.get('cat3', '')} {item['content']}" for item in filtered_chunks]
@@ -400,11 +407,11 @@ def search_internal_db(query, chunks, selected_cat1s, selected_cat2s, selected_c
 
     selected_items = []
     for idx in top_indices:
-        if cosine_sim[idx] > 0.008:
+        if cosine_sim[idx] > 0.005:
             selected_items.append(filtered_chunks[idx])
 
     if not selected_items:
-        selected_items = filtered_chunks[:min(12, len(filtered_chunks))]
+        selected_items = filtered_chunks[:min(15, len(filtered_chunks))]
 
     if is_deep_search:
         selected_items.sort(key=lambda x: (x["file_name"], x["location"]))
@@ -426,12 +433,10 @@ def highlight_keywords(text, keywords):
             )
     return highlighted
 
-# ================= 7. 側邊欄：三層可收合目錄與上傳自動清空 =================
 folder_tree = db["folder_tree"]
 chunks = db["chunks"]
 max_mb_limit = db.get("max_mb", 80)
 
-# 整理檔案三層對照表: { file_name: (c1, c2, c3, uploader) }
 file_info_map = {}
 for c in chunks:
     c1 = c.get("cat1", list(folder_tree.keys())[0])
@@ -464,7 +469,6 @@ with st.sidebar:
 
     st.caption(f"📊 檔案：**{len(file_info_map)}** 份 ｜ 容量：**{db_size_mb:.2f} MB**")
 
-    # --- 1. ➕ 上傳 (含自動清空佇列與彈窗通知) ---
     with st.expander("➕ 上傳", expanded=False):
         up_c1 = st.selectbox("1. 第一層 (主夾)：", list(folder_tree.keys()))
         up_c2 = st.selectbox("2. 第二層 (次夾)：", list(folder_tree[up_c1].keys()))
@@ -497,7 +501,6 @@ with st.sidebar:
                                 imported_names.append(uf.name)
                                 total_ocr += ocr_cnt
                         save_db(db)
-                        # 自動遞增 key 清空上傳框，並設定彈出通知視窗
                         st.session_state.uploader_key += 1
                         st.session_state.upload_notice = {
                             "count": len(imported_names),
@@ -507,7 +510,6 @@ with st.sidebar:
                         }
                         st.rerun()
 
-    # --- 2. 📁 目錄 (三層可逐級展開/收合樹狀結構) ---
     with st.expander("📁 目錄", expanded=True):
         if not file_info_map:
             st.caption("目前尚無檔案，請點上方「➕ 上傳」。")
@@ -517,13 +519,11 @@ with st.sidebar:
                 c1_files = [f for f, (fc1, _, _, _) in file_info_map.items() if fc1 == c1]
                 if not c1_files:
                     continue
-                # 第一層可收合
                 with st.expander(f"🗂️ {c1} ({len(c1_files)})", expanded=False):
                     for c2, c3_list in c2_dict.items():
                         c2_files = [f for f, (fc1, fc2, _, _) in file_info_map.items() if fc1 == c1 and fc2 == c2]
                         if not c2_files:
                             continue
-                        # 第二層可收合
                         with st.expander(f"📂 {c2} ({len(c2_files)})", expanded=False):
                             for c3 in c3_list:
                                 c3_files = sorted([f for f, (fc1, fc2, fc3, _) in file_info_map.items() if fc1 == c1 and fc2 == c2 and fc3 == c3])
@@ -534,7 +534,6 @@ with st.sidebar:
                                     if st.button(f"📄 {f}", key=f"dir_{c1}_{c2}_{c3}_{f}", use_container_width=True):
                                         st.session_state.jump_to_file = f
 
-    # --- 3. ⚙️ 三層資料夾與防呆設定 ---
     with st.expander("⚙️ 資料夾設定", expanded=False):
         t1, t2, t3, t4 = st.tabs(["第1層", "第2層", "第3層", "防呆/快捷"])
         with t1:
@@ -640,7 +639,6 @@ with st.sidebar:
                 save_db(db)
                 st.rerun()
 
-    # --- 4. 👥 帳號管理 (聖引專屬) ---
     if current_user == "聖引":
         with st.expander("👥 帳號管理 (聖引專屬)", expanded=False):
             new_u = st.text_input("➕ 新增組員姓名：")
@@ -669,7 +667,6 @@ with st.sidebar:
                     else:
                         st.warning("最高管理員「聖引」不可刪除！")
 
-    # --- 5. 💾 備份與還原 ---
     with st.expander("💾 備份與還原", expanded=False):
         if os.path.exists(DB_FILE):
             with open(DB_FILE, "rb") as f:
@@ -683,7 +680,6 @@ with st.sidebar:
 
     enable_web_search = st.checkbox("🌐 Google 聯網搜尋", value=False)
 
-# ================= 8. 主畫面：極簡頂部 & 三層範圍篩選 =================
 col_title, col_filter = st.columns([3, 2])
 with col_title:
     st.subheader("🏗️ CV02 工程助手")
@@ -700,7 +696,6 @@ with col_filter:
         ]
         selected_cat3s = st.multiselect("3. 第三層 (細夾，留空代表全選)：", list(dict.fromkeys(avail_c3)), default=[])
 
-# 若從左側目錄點擊了某個檔案，顯示頂部快速閱覽卡片 (內建一鍵改名與換資料夾)
 if st.session_state.jump_to_file and st.session_state.jump_to_file in file_info_map:
     j_file = st.session_state.jump_to_file
     jc1, jc2, jc3, jup = file_info_map[j_file]
@@ -713,7 +708,6 @@ if st.session_state.jump_to_file and st.session_state.jump_to_file in file_info_
                 st.session_state.jump_to_file = None
                 st.rerun()
 
-        # 就地快速移動與改名面板
         with st.expander("✏️ 就地改名 / 換資料夾 / 刪除此檔案", expanded=False):
             q_col1, q_col2, q_col3, q_col4 = st.columns([2, 2, 2, 2])
             with q_col1:
@@ -749,7 +743,6 @@ if st.session_state.jump_to_file and st.session_state.jump_to_file in file_info_
             with st.expander(f"📄 {fc['location']}", expanded=True):
                 st.text(fc["content"])
 
-# 建立四大主畫面分頁 (新增「📦 批次搬移與整理」)
 tab_ai, tab_search, tab_batch, tab_read = st.tabs([
     "💬 AI 問答",
     "🔎 搜檔案",
@@ -757,7 +750,6 @@ tab_ai, tab_search, tab_batch, tab_read = st.tabs([
     "📖 讀全文"
 ])
 
-# ----------------- 分頁 1：💬 AI 問答 (支援 Ctrl+V 貼圖/貼文字 & 隨附檔案) -----------------
 with tab_ai:
     shortcuts = db.get("shortcuts", DEFAULT_SHORTCUTS)
     triggered_query = None
@@ -834,7 +826,6 @@ with tab_ai:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
 
-    # 支援原生直接貼圖 (Ctrl+V) 與夾帶檔案的對話輸入框 (若環境為舊版 Streamlit 則自動優雅降級)
     inline_files = []
     user_query = None
     try:
@@ -852,7 +843,7 @@ with tab_ai:
                 if not user_query and inline_files:
                     user_query = "請幫我分析隨附的圖片或檔案內容，並與內部工程資料庫比對。"
     except TypeError:
-        chat_val = st.chat_input("請輸入問題（如：本案契約里程碑分項、鋼筋施工日期統計、關鍵要徑浮時...）")
+        chat_val = st.chat_input("請輸入問題（如：詳細價目表有沒有設計舊樁拔除、管子、里程碑分項...）")
         if chat_val:
             user_query = chat_val
 
@@ -873,7 +864,7 @@ with tab_ai:
             st.markdown(display_q)
 
         with st.chat_message("assistant"):
-            with st.spinner("🔍 正在深度檢索三層資料庫並分析中..."):
+            with st.spinner("🔍 正在透過 AI 智慧動態同義詞擴展，深度檢索詳細價目表與規範中..."):
                 internal_context = search_internal_db(user_query, db["chunks"], selected_cat1s, selected_cat2s, selected_cat3s)
                 file_summary = [
                     f"[{c1}>{c2}>{c3}] {fname}"
@@ -916,9 +907,9 @@ with tab_ai:
 
 【回答嚴格守則】：
 1. 明確標註出處：凡引用內部資料，必須標註「【目錄：第1層 > 第2層 > 第3層｜來源：檔名與頁碼/投影片頁數/工作表列數】」。
-2. 會議決議時間軸追蹤：若詢問「某議題何時決議/討論過程」，請依會議日期先後順序列出「歷次討論演進時間軸」並標示最終拍板之會議與頁數。
-3. 跨檔案全量日期/天數統計：若詢問「某工項施工日期或累計天數」，請將檢索結果中所有出現該工項之日報/週報日期逐一列出，並計算總天數。
-4. 工程術語與表格精準度：注意「浮時(Float/浮實)」、「關鍵要徑(Critical Path)」、「里程碑分項」與表格表頭欄位之對應。
+2. 工程詳細價目表/工項智能對應：面對使用者查詢特定工項（如管子、舊樁拔除、防水等），請務必主動將檢索結果中所有「同義詞、細部規格（如PVC管、既有結構拆除）」納入綜合比對。若價目表或契約中確實有包含該性質之項目，絕對不可直接斷言未編列！
+3. 會議決議時間軸追蹤：若詢問「某議題何時決議/討論過程」，請依會議日期先後順序列出「歷次討論演進時間軸」並標示最終拍板之會議與頁數。
+4. 跨檔案全量日期/天數統計：若詢問「某工項施工日期或累計天數」，請將檢索結果中所有出現該工項之日報/週報日期逐一列出，並計算總天數。
 5. 嚴禁瞎掰：若資料庫與隨附資料皆未載明，請誠實告知「目前內部文件未載明」。
 
 {temp_text_context}
@@ -967,11 +958,10 @@ with tab_ai:
                 st.markdown(answer)
                 st.session_state.messages.append({"role": "assistant", "content": answer})
 
-# ----------------- 分頁 2：🔎 搜檔案 (0.1秒螢光筆關鍵字搜尋引擎) -----------------
 with tab_search:
     col_s1, col_s2 = st.columns([3, 1])
     with col_s1:
-        search_kw = st.text_input("🔎 輸入關鍵字秒查檔案內文（多個詞用空白隔開，如：里程碑 罰則 預算）：", placeholder="輸入後按 Enter 立即列出所有頁數...")
+        search_kw = st.text_input("🔎 輸入關鍵字秒查檔案內文（多個詞用空白隔開，如：管 拔除 預算）：", placeholder="輸入後按 Enter 立即列出所有頁數...")
     with col_s2:
         match_mode = st.radio("匹配模式：", ["包含任一 (OR)", "包含全部 (AND)"], horizontal=True)
 
@@ -1006,13 +996,11 @@ with tab_search:
                 hl_html = highlight_keywords(item["content"], raw_kws).replace("\n", "<br>")
                 st.markdown(f"<div style='font-size: 0.95rem; line-height: 1.6;'>{hl_html}</div>", unsafe_allow_html=True)
 
-# ----------------- 分頁 3：📦 批次搬移與整理 (多選打勾一鍵搬家/刪除) -----------------
 with tab_batch:
     st.markdown("#### 📦 檔案批次搬移、改名與刪除總管")
     if not file_info_map:
         st.info("目前資料庫尚無檔案。")
     else:
-        # 篩選要顯示的來源資料夾以便快速勾選
         b_col1, b_col2 = st.columns([2, 2])
         with b_col1:
             filter_b_c1 = st.selectbox("🔍 篩選檢視的來源主夾：", ["(顯示全部檔案)"] + list(folder_tree.keys()))
@@ -1095,7 +1083,6 @@ with tab_batch:
                 st.success(f"🗑️ 已批次刪除 {len(sel_names)} 份檔案！")
                 st.rerun()
 
-# ----------------- 分頁 4：📖 讀全文 -----------------
 with tab_read:
     if not file_info_map:
         st.info("目前尚無檔案。")
