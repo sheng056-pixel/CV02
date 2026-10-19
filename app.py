@@ -154,7 +154,7 @@ def ocr_with_gemini(file_bytes, mime_type, desc=""):
         "請完整、精準地辨識並轉錄這份工程公文、圖表或照片中的所有繁體中文文字、文號、日期、表格數據與印章文字。"
         "若有表格請以『欄位1 | 欄位2』格式呈現，不要遺漏任何細節。"
     )
-    for model_name in ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-2.5-flash-lite"]:
+    for model_name in ["gemini-3.8-flash", "gemini-3.5-flash-lite", "gemini-3.5-flash"]:
         try:
             resp = client.models.generate_content(
                 model=model_name,
@@ -747,7 +747,7 @@ with tab_ai:
                 answer = None
                 contents_payload = multimodal_parts + [system_prompt] if multimodal_parts else system_prompt
 
-                for model_name in ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-2.5-flash-lite"]:
+                for model_name in ["gemini-3.8-flash", "gemini-3.5-flash-lite", "gemini-3.5-flash"]:
                     try:
                         config_args = {"temperature": 0.2}
                         if enable_web_search:
