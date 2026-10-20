@@ -58,14 +58,13 @@ DEFAULT_FOLDER_TREE_V7 = {
     }
 }
 
-# 夥伴專屬工號與中文姓名對應表
 DEFAULT_USERS = {
-    "聖引": {"password": TEAM_PASSWORD, "role": "管理員"},
+    "聖引": {"password": TEAM_PASSWORD, "role": "管理員", "display_name": "聖引"},
     "668436": {"password": TEAM_PASSWORD, "role": "一般組員", "display_name": "淳凱"},
     "077343": {"password": TEAM_PASSWORD, "role": "一般組員", "display_name": "有朋"},
     "479701": {"password": TEAM_PASSWORD, "role": "一般組員", "display_name": "旭暉"},
     "331165": {"password": TEAM_PASSWORD, "role": "一般組員", "display_name": "宣頷"},
-    "組員A": {"password": TEAM_PASSWORD, "role": "一般組員"}
+    "組員A": {"password": TEAM_PASSWORD, "role": "一般組員", "display_name": "組員A"}
 }
 
 DEFAULT_SHORTCUTS = [
@@ -167,7 +166,6 @@ if not st.session_state.current_user:
     st.title("🏗️ CV02 工程助手 — 登入")
     st.caption("勾選「記住我」後將網頁加入手機主畫面或書籤，下次點開即可直接進入系統！")
     with st.container(border=True):
-        # 顯示登入選單時，將工號轉換為具備中文姓名的選項
         login_options = list(users_db.keys())
         def format_user_label(u):
             if u in users_db and "display_name" in users_db[u]:
@@ -477,6 +475,10 @@ with st.sidebar:
 
     st.caption(f"📊 檔案：**{len(file_info_map)}** 份 ｜ 容量：**{db_size_mb:.2f} MB**")
 
+    with st.expander("☁️ 專案雲端資料夾捷徑", expanded=False):
+        st.markdown("[📁 每日施工照片雲端夾](https://drive.google.com/drive/folders/1MFrIjPZB3cBWBb2Nt_q2eaTRDw7zzno9?usp=drive_link)")
+        st.markdown("[📁 每日日報更新雲端夾](https://drive.google.com/drive/folders/1vmmaXftLfCTT3fd5_x_sIl6jc9KrEATX?usp=drive_link)")
+
     with st.expander("➕ 上傳", expanded=False):
         up_c1 = st.selectbox("1. 第一層 (主夾)：", list(folder_tree.keys()))
         up_c2 = st.selectbox("2. 第二層 (次夾)：", list(folder_tree[up_c1].keys()))
@@ -638,7 +640,6 @@ with st.sidebar:
                 if st.button("🗑️ 刪細夾", use_container_width=True) and len(folder_tree[p3_c1][p3_c2]) > 1:
                     folder_tree[p3_c1][p3_c2].remove(target_c3)
                     for c in chunks:
-                        # 修正此處原本的語法錯誤
                         if c.get("cat1") == p3_c1 and c.get("cat2") == p3_c2 and c.get("cat3") == target_c3:
                             c["cat3"] = ""
                     save_db(db)
@@ -772,8 +773,10 @@ if st.session_state.jump_to_file and st.session_state.jump_to_file in file_info_
             with st.expander(f"📄 {fc['location']}", expanded=True):
                 st.text(fc["content"])
 
-tab_ai, tab_search, tab_batch, tab_read = st.tabs([
+# ================= 核心四大分頁 =================
+tab_ai, tab_memo, tab_search, tab_batch, tab_read = st.tabs([
     "💬 AI 問答",
+    "📝 公文生成",
     "🔎 搜檔案",
     "📦 批次搬移與整理",
     "📖 讀全文"
@@ -991,10 +994,94 @@ with tab_ai:
                 st.session_state.messages.append({"role": "assistant", "content": answer})
                 st.rerun()
 
+# ================= 📝 公文生成專屬分頁 =================
+with tab_memo:
+    st.markdown("### 📝 智慧公文生成與自動排版室")
+    st.caption("AI 將自動學習您上傳在資料庫中的歷史公文慣用語法、敘述風格與陳核對象，產出標準排版公文，並可一鍵下載 Word (.docx) 檔！")
+
+    memo_topic = st.text_area("📌 請輸入擬稿需求或事件摘要（例如：針對現場排水管線繞道變更設計，擬函請監造單位核定...）：", height=100)
+    
+    m_col1, m_col2 = st.columns(2)
+    with m_col1:
+        memo_type = st.selectbox("📄 文別選擇：", ["函", "書函", "簽呈", "開會通知單", "紀錄"])
+    with m_col2:
+        memo_target = st.text_input("🏢 預定受文對象（如未填，AI 將自動從歷史公文學習判斷）：", placeholder="例如：台灣世曦工程顧問股份有限公司 / 監造單位")
+
+    if st.button("🚀 開始智慧擬稿與排版", type="primary", use_container_width=True):
+        if not memo_topic.strip():
+            st.warning("請先輸入擬稿需求！")
+        else:
+            with st.spinner("🤖 AI 正在深度參考您的歷史公文風格、慣用語法、受文對象與內部資料庫契約規範進行擬稿中..."):
+                # 抓取資料庫中的歷史公文作為風格參考
+                memo_history_chunks = [
+                    c for c in db["chunks"] 
+                    if "公文" in c.get("cat1", "") or "公文" in c.get("cat2", "") or "往來" in c.get("cat2", "")
+                ]
+                history_text = "\n".join([f"【參考範本：{c['file_name']}】\n{c['content']}" for c in memo_history_chunks[:10]])
+                
+                contract_context = search_internal_db(memo_topic, db["chunks"], selected_cat1s, selected_cat2s, selected_cat3s)
+
+                memo_prompt = f"""
+你是一位專業、嚴謹的台電新建工程處資深工程祕書與主任工程師。擬稿人：{current_user}。
+請根據以下【歷史公文參考範本】（請徹底學習其慣用語法、敘述風格、排版結構與陳核對象習慣）以及【內部合約與資料庫檢索結果】，幫使用者產出一份標準的工程公文。
+
+【文別】：{memo_type}
+【受文對象】：{memo_target if memo_target.strip() else "請依歷史公文習慣自動判定"}
+【擬稿核心需求】：{memo_topic}
+
+【歷史公文參考範本（請模仿其風格與慣用語）】：
+{history_text if history_text.strip() else "（目前尚無歷史公文，請依標準台電工程公文格式產出）"}
+
+【內部合約與資料庫檢索結果】：
+{contract_context}
+
+【公文嚴格排版與內容規範】：
+1. 必須嚴格遵守標準公文格式，包含【受文者】、【主旨】（開頭空兩格，簡明扼要）、【說明】（分項條列（一）、（二）、（三）並自動空行換行）、【辦法】（明確指示後續辦理動作）。
+2. 絕對不允許文字全部擠在一起，段落之間必須有清晰的空行與縮排。
+3. 語氣必須符合工程實務之嚴謹、專業、具說服力，並符合擬稿人平常慣用的公文敘述口氣。
+"""
+                client = genai.Client(api_key=GEMINI_API_KEY)
+                memo_res = client.models.generate_content(
+                    model="gemini-3.5-flash",
+                    contents=memo_prompt,
+                    config=types.GenerateContentConfig(temperature=0.2)
+                )
+                generated_memo_text = memo_res.text if memo_res and memo_res.text else "⚠️ 生成失敗，請稍後再試。"
+                st.session_state.last_generated_memo = generated_memo_text
+                st.rerun()
+
+    if st.session_state.get("last_generated_memo"):
+        st.divider()
+        st.markdown("### 📄 產出之標準排版公文預覽：")
+        st.markdown(st.session_state.last_generated_memo)
+
+        # 動態生成 Word 檔供下載
+        doc_gen = docx.Document()
+        doc_gen.add_heading(f"工程公文草稿 — {current_user} 擬", level=1)
+        for line in st.session_state.last_generated_memo.split("\n"):
+            if line.strip().startswith("###") or line.strip().startswith("【"):
+                doc_gen.add_heading(line.replace("#", "").strip(), level=2)
+            else:
+                doc_gen.add_paragraph(line)
+        
+        docx_buf = io.BytesIO()
+        doc_gen.save(docx_buf)
+        docx_bytes = docx_buf.getvalue()
+
+        st.download_button(
+            label="📥 一鍵下載排版完整的 Word 檔 (.docx)",
+            data=docx_bytes,
+            file_name=f"工程公文草稿_{current_user}.docx",
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            type="primary",
+            use_container_width=True
+        )
+
+# ================= 🔎 搜尋分頁（清單總覽 ＋ 點擊折疊展開） =================
 with tab_search:
     col_s1, col_s2 = st.columns([3, 1])
     with col_s1:
-        search_kw = st.text_input("🔎 輸入關鍵字秒查檔案內文（多個詞用空白隔開，如：管 拔除 預算）：", placeholder="輸入後按 Enter 立即列出所有頁數...")
+        search_kw = st.text_input("🔎 輸入關鍵字秒查檔案內文（多個詞用空白隔開，如：管 拔除 預算）：", placeholder="輸入後按 Enter 立即列出檔案清單...")
     with col_s2:
         match_mode = st.radio("匹配模式：", ["包含任一 (OR)", "包含全部 (AND)"], horizontal=True)
 
@@ -1019,17 +1106,33 @@ with tab_search:
                 matched_results.append((hits, c))
 
         matched_results.sort(key=lambda x: x[0], reverse=True)
-        st.success(f"🎯 共找到 **{len(matched_results)}** 個段落！")
+        st.success(f"🎯 共找到符合條件的段落總計 **{len(matched_results)}** 處！以下為檔案清單總覽：")
 
-        for idx, (hits, item) in enumerate(matched_results, 1):
-            with st.container(border=True):
-                c3_disp = f" > {item['cat3']}" if item.get('cat3') else ""
-                st.markdown(
-                    f"**#{idx}｜🗂️ `{item['cat1']} > {item['cat2']}{c3_disp}` ｜ 📄 `{item['file_name']}` {item['location']}** "
-                    f"*(命中 {hits} 次｜上傳：{item.get('uploader', '系統')})*"
-                )
-                hl_html = highlight_keywords(item["content"], raw_kws).replace("\n", "<br>")
-                st.markdown(f"<div style='font-size: 0.95rem; line-height: 1.6;'>{hl_html}</div>", unsafe_allow_html=True)
+        # 依檔案分組彙整
+        file_grouped_hits = {}
+        for hits, item in matched_results:
+            fname = item["file_name"]
+            if fname not in file_grouped_hits:
+                file_grouped_hits[fname] = {
+                    "cat1": item["cat1"], "cat2": item["cat2"], "cat3": item.get("cat3", ""),
+                    "uploader": item.get("uploader", "系統"), "total_hits": 0, "chunks": []
+                }
+            file_grouped_hits[fname]["total_hits"] += hits
+            file_grouped_hits[fname]["chunks"].append((hits, item))
+
+        st.caption("💡 點擊下方各檔案卡片即可展開／收合檢視詳細命中文內與螢光標記：")
+
+        for fname, gdata in file_grouped_hits.items():
+            c3_str = f" > {gdata['cat3']}" if gdata['cat3'] else " (直接放第二層)"
+            card_title = f"📄 {fname} ｜ 🗂️ {gdata['cat1']} > {gdata['cat2']}{c3_str} ｜ 命中段落：{len(gdata['chunks'])} 處 (總計 {gdata['total_hits']} 次)"
+            
+            with st.expander(card_title, expanded=False):
+                for idx, (h_cnt, chk) in enumerate(gdata["chunks"], 1):
+                    st.markdown(f"**📍 命中位置：`{chk['location']}`** *(本段命中 {h_cnt} 次)*")
+                    hl_html = highlight_keywords(chk["content"], raw_kws).replace("\n", "<br>")
+                    st.markdown(f"<div style='background-color: #f8f9fa; padding: 10px; border-radius: 6px; font-size: 0.95rem; line-height: 1.6; border-left: 3px solid #ffc107;'>{hl_html}</div>", unsafe_allow_html=True)
+                    if idx < len(gdata["chunks"]):
+                        st.divider()
 
 with tab_batch:
     st.markdown("#### 📦 檔案批次搬移、改名與刪除總管")
