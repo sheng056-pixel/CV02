@@ -119,9 +119,7 @@ def load_db():
                         tree_3d[c1][c2] = ["一般文件"]
                     if not tree_3d[c1][c2]:
                         tree_3d[c1][c2] = ["一般文件"]
-                    c3 = c.get("cat3", tree_3d[c1][c2][0])
-                    if c3 not in tree_3d[c1][c2]:
-                        tree_3d[c1][c2].append(c3)
+                    c3 = c.get("cat3", "")
                     c["cat1"], c["cat2"], c["cat3"] = c1, c2, c3
                     if "uploader" not in c:
                         c["uploader"] = "聖引"
@@ -184,7 +182,7 @@ current_user = st.session_state.current_user
 @st.dialog("🎉 檔案匯入成功！")
 def show_upload_success_dialog(info):
     st.success(f"✅ 已成功將 **{info['count']}** 份檔案寫入工程資料庫！")
-    st.markdown(f"**📂 歸檔三層路徑：** `{info['path']}`")
+    st.markdown(f"**📂 歸檔路徑：** `{info['path']}`")
     if info.get("ocr_pages", 0) > 0:
         st.info(f"👁️ 內含 **{info['ocr_pages']}** 頁掃描影像，已自動透過 AI 視覺辨識轉為可搜尋文字！")
     st.markdown("**📄 本次匯入檔案清單：**")
@@ -388,7 +386,7 @@ def search_internal_db(query, chunks, selected_cat1s, selected_cat2s, selected_c
         c for c in chunks
         if c.get("cat1") in selected_cat1s
         and (not selected_cat2s or c.get("cat2") in selected_cat2s)
-        and (not selected_cat3s or c.get("cat3") in selected_cat3s)
+        and (not selected_cat3s or (not c.get("cat3") or c.get("cat3") in selected_cat3s))
     ]
     if not filtered_chunks:
         return "（目前勾選的資料夾範圍內尚無文件）"
@@ -416,7 +414,7 @@ def search_internal_db(query, chunks, selected_cat1s, selected_cat2s, selected_c
         selected_items.sort(key=lambda x: (x["file_name"], x["location"]))
 
     results = [
-        f"【目錄：{item['cat1']} > {item['cat2']} > {item.get('cat3', '一般')}｜來源：{item['file_name']} {item['location']}】\n{item['content']}"
+        f"【目錄：{item['cat1']} > {item['cat2']}{' > ' + item['cat3'] if item.get('cat3') else ''}｜來源：{item['file_name']} {item['location']}】\n{item['content']}"
         for item in selected_items
     ]
     return "\n\n---\n\n".join(results)
@@ -444,9 +442,7 @@ for c in chunks:
     c2 = c.get("cat2", list(folder_tree[c1].keys())[0])
     if c2 not in folder_tree[c1]:
         folder_tree[c1][c2] = ["一般文件"]
-    c3 = c.get("cat3", folder_tree[c1][c2][0])
-    if c3 not in folder_tree[c1][c2]:
-        folder_tree[c1][c2].append(c3)
+    c3 = c.get("cat3", "")
     file_info_map[c["file_name"]] = (c1, c2, c3, c.get("uploader", "系統"))
 
 db_size_mb = os.path.getsize(DB_FILE) / (1024 * 1024) if os.path.exists(DB_FILE) else 0.0
@@ -471,7 +467,13 @@ with st.sidebar:
     with st.expander("➕ 上傳", expanded=False):
         up_c1 = st.selectbox("1. 第一層 (主夾)：", list(folder_tree.keys()))
         up_c2 = st.selectbox("2. 第二層 (次夾)：", list(folder_tree[up_c1].keys()))
-        up_c3 = st.selectbox("3. 第三層 (細夾)：", folder_tree[up_c1][up_c2])
+        
+        # 第三層改為選填：加入 "(無細夾 / 直接放第二層)" 選項
+        raw_c3_opts = folder_tree[up_c1][up_c2]
+        c3_opts = ["(無細夾 / 直接放第二層)"] + (raw_c3_opts if isinstance(raw_c3_opts, list) else [])
+        up_c3_selected = st.selectbox("3. 第三層 (細夾，可選無)：", c3_opts)
+        up_c3 = "" if up_c3_selected == "(無細夾 / 直接放第二層)" else up_c3_selected
+
         enable_ocr_upload = st.checkbox("👁️ 掃描檔自動 AI 光學辨識 (OCR)", value=True)
         uploaded_files = st.file_uploader(
             f"4. 選擇檔案 (上限 {max_mb_limit}MB)",
@@ -504,7 +506,7 @@ with st.sidebar:
                         st.session_state.upload_notice = {
                             "count": len(imported_names),
                             "files": imported_names,
-                            "path": f"{up_c1} > {up_c2} > {up_c3}",
+                            "path": f"{up_c1} > {up_c2}" + (f" > {up_c3}" if up_c3 else " (第二層)"),
                             "ocr_pages": total_ocr
                         }
                         st.rerun()
@@ -524,6 +526,13 @@ with st.sidebar:
                         if not c2_files:
                             continue
                         with st.expander(f"📂 {c2} ({len(c2_files)})", expanded=False):
+                            # 顯示直接放在第二層（無第三層）的檔案
+                            no_c3_files = sorted([f for f, (fc1, fc2, fc3, _) in file_info_map.items() if fc1 == c1 and fc2 == c2 and not fc3])
+                            if no_c3_files:
+                                st.markdown(f"**🏷️ (直接放第二層)** `({len(no_c3_files)})`")
+                                for f in no_c3_files:
+                                    if st.button(f"📄 {f}", key=f"dir_{c1}_{c2}_none_{f}", use_container_width=True):
+                                        st.session_state.jump_to_file = f
                             for c3 in c3_list:
                                 c3_files = sorted([f for f, (fc1, fc2, fc3, _) in file_info_map.items() if fc1 == c1 and fc2 == c2 and fc3 == c3])
                                 if not c3_files:
@@ -558,10 +567,9 @@ with st.sidebar:
                     del folder_tree[target_c1]
                     fb1 = list(folder_tree.keys())[0]
                     fb2 = list(folder_tree[fb1].keys())[0]
-                    fb3 = folder_tree[fb1][fb2][0]
                     for c in chunks:
                         if c.get("cat1") == target_c1:
-                            c["cat1"], c["cat2"], c["cat3"] = fb1, fb2, fb3
+                            c["cat1"], c["cat2"], c["cat3"] = fb1, fb2, ""
                     save_db(db)
                     st.rerun()
 
@@ -588,10 +596,9 @@ with st.sidebar:
                 if st.button("🗑️ 刪次夾", use_container_width=True) and len(folder_tree[p_c1]) > 1:
                     del folder_tree[p_c1][target_c2]
                     fb2 = list(folder_tree[p_c1].keys())[0]
-                    fb3 = folder_tree[p_c1][fb2][0]
                     for c in chunks:
                         if c.get("cat1") == p_c1 and c.get("cat2") == target_c2:
-                            c["cat2"], c["cat3"] = fb2, fb3
+                            c["cat2"], c["cat3"] = fb2, ""
                     save_db(db)
                     st.rerun()
 
@@ -619,10 +626,9 @@ with st.sidebar:
             with cf:
                 if st.button("🗑️ 刪細夾", use_container_width=True) and len(folder_tree[p3_c1][p3_c2]) > 1:
                     folder_tree[p3_c1][p3_c2].remove(target_c3)
-                    fb3 = folder_tree[p3_c1][p3_c2][0]
                     for c in chunks:
-                        if c.get("cat1") == p3_c1 and c.get("cat2") == p3_c2 and c.get("cat3") == target_c3:
-                            c["cat3"] = fb3
+                        if c.get("cat1") == p3_c1 and c.get("cat2"] == p3_c2 and c.get("cat3") == target_c3:
+                            c["cat3"] = ""
                     save_db(db)
                     st.rerun()
 
@@ -701,7 +707,8 @@ if st.session_state.jump_to_file and st.session_state.jump_to_file in file_info_
     with st.container(border=True):
         jh1, jh2 = st.columns([5, 1])
         with jh1:
-            st.markdown(f"### 📖 快速閱覽：`{j_file}`  `({jc1} > {jc2} > {jc3}｜上傳：{jup})`")
+            path_str = f"{jc1} > {jc2}" + (f" > {jc3}" if jc3 else "")
+            st.markdown(f"### 📖 快速閱覽：`{j_file}`  `({path_str}｜上傳：{jup})`")
         with jh2:
             if st.button("✖️ 關閉閱覽", use_container_width=True):
                 st.session_state.jump_to_file = None
@@ -718,8 +725,12 @@ if st.session_state.jump_to_file and st.session_state.jump_to_file in file_info_
                 c2_opts = list(folder_tree[q_c1].keys())
                 q_c2 = st.selectbox("移至第2層：", c2_opts, index=c2_opts.index(jc2) if jc2 in c2_opts else 0, key="q_c2")
             with q_col4:
-                c3_opts = folder_tree[q_c1][q_c2]
-                q_c3 = st.selectbox("移至第3層：", c3_opts, index=c3_opts.index(jc3) if jc3 in c3_opts else 0, key="q_c3")
+                raw_q3_opts = folder_tree[q_c1][q_c2]
+                q3_opts_all = ["(無細夾 / 直接放第二層)"] + (raw_q3_opts if isinstance(raw_q3_opts, list) else [])
+                curr_q3_idx = q3_opts_all.index(jc3) if jc3 in q3_opts_all else 0
+                q_c3_sel = st.selectbox("移至第3層：", q3_opts_all, index=curr_q3_idx, key="q_c3_sel")
+                q_c3 = "" if q_c3_sel == "(無細夾 / 直接放第二層)" else q_c3_sel
+
             qb1, qb2 = st.columns(2)
             with qb1:
                 if st.button("💾 儲存變更", key="q_save", type="primary", use_container_width=True):
@@ -782,7 +793,10 @@ with tab_ai:
             with tc2:
                 save_t_c2 = st.selectbox("次夾：", list(folder_tree[save_t_c1].keys()), key="st_c2")
             with tc3:
-                save_t_c3 = st.selectbox("細夾：", folder_tree[save_t_c1][save_t_c2], key="st_c3")
+                raw_st_c3 = folder_tree[save_t_c1][save_t_c2]
+                st_c3_opts = ["(無細夾 / 直接放第二層)"] + (raw_st_c3 if isinstance(raw_st_c3, list) else [])
+                st_c3_sel = st.selectbox("細夾：", st_c3_opts, key="st_c3_sel")
+                save_t_c3 = "" if st_c3_sel == "(無細夾 / 直接放第二層)" else st_c3_sel
             with tc4:
                 pasted_fname = st.text_input("若存貼上文字之檔名：", value="臨時貼上資料.txt", key="st_fn")
             with tc5:
@@ -811,7 +825,7 @@ with tab_ai:
                     st.session_state.upload_notice = {
                         "count": len(saved_names),
                         "files": saved_names,
-                        "path": f"{save_t_c1} > {save_t_c2} > {save_t_c3}",
+                        "path": f"{save_t_c1} > {save_t_c2}" + (f" > {save_t_c3}" if save_t_c3 else ""),
                         "ocr_pages": 0
                     }
                     st.rerun()
@@ -850,7 +864,6 @@ with tab_ai:
         user_query = triggered_query
 
     if user_query:
-        # 單次使用制：把當次夾帶的檔案抓出來，並立刻在 session 裡清空，防止沾黏下一題
         all_temp_files = list(temp_files or []) + inline_files
         extra_tags = []
         if all_temp_files:
@@ -867,11 +880,11 @@ with tab_ai:
             with st.spinner("🔍 正在透過 AI 智慧動態同義詞擴展，深度檢索詳細價目表與規範中..."):
                 internal_context = search_internal_db(user_query, db["chunks"], selected_cat1s, selected_cat2s, selected_cat3s)
                 file_summary = [
-                    f"[{c1}>{c2}>{c3}] {fname}"
+                    f"[{c1}>{c2}{'>' + c3 if c3 else ''}] {fname}"
                     for fname, (c1, c2, c3, _) in file_info_map.items()
                     if c1 in selected_cat1s
                     and (not selected_cat2s or c2 in selected_cat2s)
-                    and (not selected_cat3s or c3 in selected_cat3s)
+                    and (not selected_cat3s or (not c3 or c3 in selected_cat3s))
                 ]
 
                 temp_text_context = ""
@@ -886,7 +899,7 @@ with tab_ai:
                         multimodal_parts.append(types.Part.from_bytes(data=tf.getvalue(), mime_type=mime))
                         temp_text_context += f"\n【隨附影像/截圖：{tf.name}（請直接觀看影像內容並對照內部資料庫回答）】\n"
                     elif lname.endswith(".pdf"):
-                        t_chunks, _ = extract_text_from_file(tf, "臨時", "臨時", "臨時", current_user, enable_ocr=False)
+                        t_chunks, _ = extract_text_from_file(tf, "臨時", "臨時", "", current_user, enable_ocr=False)
                         if t_chunks:
                             joined_t = "\n".join([f"{c['location']} {c['content']}" for c in t_chunks])
                             temp_text_context += f"\n=== 隨附臨時檔案：{tf.name} ===\n{joined_t[:15000]}\n"
@@ -894,7 +907,7 @@ with tab_ai:
                             multimodal_parts.append(types.Part.from_bytes(data=tf.getvalue(), mime_type="application/pdf"))
                             temp_text_context += f"\n【隨附掃描PDF：{tf.name}（請直接視覺閱讀此PDF內容）】\n"
                     else:
-                        t_chunks, _ = extract_text_from_file(tf, "臨時", "臨時", "臨時", current_user, enable_ocr=False)
+                        t_chunks, _ = extract_text_from_file(tf, "臨時", "臨時", "", current_user, enable_ocr=False)
                         joined_t = "\n".join([f"{c['location']} {c['content']}" for c in t_chunks])
                         temp_text_context += f"\n=== 隨附臨時檔案：{tf.name} ===\n{joined_t[:15000]}\n"
 
@@ -906,7 +919,7 @@ with tab_ai:
 {", ".join(file_summary) if file_summary else "尚未匯入文件"}
 
 【回答嚴格守則】：
-1. 明確標註出處：凡引用內部資料，必須標註「【目錄：第1層 > 第2層 > 第3層｜來源：檔名與頁碼/投影片頁數/工作表列數】」。
+1. 明確標註出處：凡引用內部資料，必須標註「【目錄：第1層 > 第2層 [> 第3層]｜來源：檔名與頁碼/投影片頁數/工作表列數】」。
 2. 工程詳細價目表/工項智能對應：面對使用者查詢特定工項（如管子、舊樁拔除、防水等），請務必主動將檢索結果中所有「同義詞、細部規格（如PVC管、既有結構拆除）」納入綜合比對。若價目表或契約中確實有包含該性質之項目，絕對不可直接斷言未編列！
 3. 會議決議時間軸追蹤：若詢問「某議題何時決議/討論過程」，請依會議日期先後順序列出「歷次討論演進時間軸」並標示最終拍板之會議與頁數。
 4. 跨檔案全量日期/天數統計：若詢問「某工項施工日期或累計天數」，請將檢索結果中所有出現該工項之日報/週報日期逐一列出，並計算總天數。
@@ -957,7 +970,6 @@ with tab_ai:
 
                 st.markdown(answer)
                 st.session_state.messages.append({"role": "assistant", "content": answer})
-                # 單次使用制：回答完畢後強制重整以清空暫存檔案，防止沾黏
                 st.rerun()
 
 with tab_search:
@@ -975,7 +987,8 @@ with tab_search:
                 continue
             if selected_cat2s and c.get("cat2") not in selected_cat2s:
                 continue
-            if selected_cat3s and c.get("cat3") not in selected_cat3s:
+            c3_val = c.get("cat3", "")
+            if selected_cat3s and c3_val and c3_val not in selected_cat3s:
                 continue
             target_text = f"{c['file_name']} {c['content']}".lower()
             if match_mode == "包含全部 (AND)":
@@ -991,8 +1004,9 @@ with tab_search:
 
         for idx, (hits, item) in enumerate(matched_results, 1):
             with st.container(border=True):
+                c3_disp = f" > {item['cat3']}" if item.get('cat3') else ""
                 st.markdown(
-                    f"**#{idx}｜🗂️ `{item['cat1']} > {item['cat2']} > {item.get('cat3', '一般')}` ｜ 📄 `{item['file_name']}` {item['location']}** "
+                    f"**#{idx}｜🗂️ `{item['cat1']} > {item['cat2']}{c3_disp}` ｜ 📄 `{item['file_name']}` {item['location']}** "
                     f"*(命中 {hits} 次｜上傳：{item.get('uploader', '系統')})*"
                 )
                 hl_html = highlight_keywords(item["content"], raw_kws).replace("\n", "<br>")
@@ -1019,10 +1033,11 @@ with tab_batch:
         table_data = []
         for f in display_files:
             fc1, fc2, fc3, fup = file_info_map[f]
+            path_display = f"{fc1} > {fc2}" + (f" > {fc3}" if fc3 else " (直接放第二層)")
             table_data.append({
                 "勾選": False,
                 "檔案名稱 (雙擊可直接改名)": f,
-                "目前所在三層路徑": f"{fc1} > {fc2} > {fc3}",
+                "目前所在三層路徑": path_display,
                 "上傳者": fup,
                 "_orig_name": f
             })
@@ -1065,7 +1080,10 @@ with tab_batch:
         with m_col2:
             dest_c2 = st.selectbox("目標第2層 (次夾)：", list(folder_tree[dest_c1].keys()), key="b_c2")
         with m_col3:
-            dest_c3 = st.selectbox("目標第3層 (細夾)：", folder_tree[dest_c1][dest_c2], key="b_c3")
+            raw_b_c3 = folder_tree[dest_c1][dest_c2]
+            b_c3_opts = ["(無細夾 / 直接放第二層)"] + (raw_b_c3 if isinstance(raw_b_c3, list) else [])
+            b_c3_sel = st.selectbox("目標第3層 (可選無)：", b_c3_opts, key="b_c3_sel")
+            dest_c3 = "" if b_c3_sel == "(無細夾 / 直接放第二層)" else b_c3_sel
         with m_col4:
             st.write("")
             if st.button(f"📦 一鍵搬移 ({len(selected_rows)} 份)", type="primary", use_container_width=True, disabled=(len(selected_rows) == 0)):
@@ -1074,7 +1092,8 @@ with tab_batch:
                     if c["file_name"] in sel_names:
                         c["cat1"], c["cat2"], c["cat3"] = dest_c1, dest_c2, dest_c3
                 save_db(db)
-                st.success(f"✅ 已將 {len(sel_names)} 份檔案成功搬移至【{dest_c1} > {dest_c2} > {dest_c3}】！")
+                dest_path_str = f"{dest_c1} > {dest_c2}" + (f" > {dest_c3}" if dest_c3 else "")
+                st.success(f"✅ 已將 {len(sel_names)} 份檔案成功搬移至【{dest_path_str}】！")
                 st.rerun()
         with m_col5:
             st.write("")
@@ -1093,7 +1112,8 @@ with tab_read:
         default_idx = sorted_files.index(st.session_state.jump_to_file) if st.session_state.jump_to_file in sorted_files else 0
         view_file = st.selectbox("選擇要閱讀的檔案：", sorted_files, index=default_idx)
         vc1, vc2, vc3, vup = file_info_map[view_file]
-        st.caption(f"📂 三層路徑：**{vc1} > {vc2} > {vc3}** ｜ 👤 上傳者：**{vup}**")
+        path_read_str = f"{vc1} > {vc2}" + (f" > {vc3}" if vc3 else " (直接放第二層)")
+        st.caption(f"📂 三層路徑：**{path_read_str}** ｜ 👤 上傳者：**{vup}**")
         for fc in [c for c in chunks if c["file_name"] == view_file]:
             with st.expander(f"📄 {fc['file_name']} — {fc['location']}", expanded=True):
                 st.text(fc["content"])
