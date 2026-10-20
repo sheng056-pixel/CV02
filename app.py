@@ -366,7 +366,6 @@ def expand_query_with_synonyms(query):
         if key in query:
             expanded += " " + " ".join(syns)
     
-    # 動態 AI 智慧擴展：針對使用者輸入的工項、材料或設備自動聯想相關同義詞與細項
     if GEMINI_API_KEY and len(query.strip()) <= 20:
         try:
             client = genai.Client(api_key=GEMINI_API_KEY)
@@ -759,7 +758,7 @@ with tab_ai:
             if sc_cols[idx].button(sc_text, key=f"sc_{idx}", use_container_width=True):
                 triggered_query = sc_text
 
-    with st.expander("📋 直接複製貼上文字／表格 ＆ 📎 隨附臨時檔案問 AI（不弄亂永久目錄，亦可一鍵歸檔）", expanded=False):
+    with st.expander("📋 直接複製貼上文字／表格 ＆ 📎 隨附臨時檔案問 AI（送出後自動清空絕不沾黏）", expanded=False):
         p_col1, p_col2 = st.columns(2)
         with p_col1:
             pasted_context = st.text_area(
@@ -769,7 +768,7 @@ with tab_ai:
             )
         with p_col2:
             temp_files = st.file_uploader(
-                "📎 或選擇臨時檔案 / 螢幕截圖 (亦可在最下方打字框直接 Ctrl+V 貼截圖)：",
+                "📎 或選擇臨時檔案 / 螢幕截圖：",
                 type=["pdf", "docx", "pptx", "xlsx", "txt", "jpg", "jpeg", "png"],
                 accept_multiple_files=True,
                 key="chat_temp_files"
@@ -830,7 +829,7 @@ with tab_ai:
     user_query = None
     try:
         chat_val = st.chat_input(
-            "請輸入問題（支援在此直接 Ctrl+V 貼上截圖，或點左側 ➕ 夾帶檔案）...",
+            "請輸入問題（支援在此直接 Ctrl+V 貼上截圖，或夾帶檔案）...",
             accept_file="multiple",
             file_type=["pdf", "docx", "pptx", "xlsx", "txt", "jpg", "jpeg", "png"]
         )
@@ -851,6 +850,7 @@ with tab_ai:
         user_query = triggered_query
 
     if user_query:
+        # 單次使用制：把當次夾帶的檔案抓出來，並立刻在 session 裡清空，防止沾黏下一題
         all_temp_files = list(temp_files or []) + inline_files
         extra_tags = []
         if all_temp_files:
@@ -957,6 +957,8 @@ with tab_ai:
 
                 st.markdown(answer)
                 st.session_state.messages.append({"role": "assistant", "content": answer})
+                # 單次使用制：回答完畢後強制重整以清空暫存檔案，防止沾黏
+                st.rerun()
 
 with tab_search:
     col_s1, col_s2 = st.columns([3, 1])
