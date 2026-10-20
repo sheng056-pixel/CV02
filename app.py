@@ -58,8 +58,13 @@ DEFAULT_FOLDER_TREE_V7 = {
     }
 }
 
+# 夥伴專屬工號與中文姓名對應表
 DEFAULT_USERS = {
     "聖引": {"password": TEAM_PASSWORD, "role": "管理員"},
+    "668436": {"password": TEAM_PASSWORD, "role": "一般組員", "display_name": "淳凱"},
+    "077343": {"password": TEAM_PASSWORD, "role": "一般組員", "display_name": "有朋"},
+    "479701": {"password": TEAM_PASSWORD, "role": "一般組員", "display_name": "旭暉"},
+    "331165": {"password": TEAM_PASSWORD, "role": "一般組員", "display_name": "宣頷"},
     "組員A": {"password": TEAM_PASSWORD, "role": "一般組員"}
 }
 
@@ -162,7 +167,14 @@ if not st.session_state.current_user:
     st.title("🏗️ CV02 工程助手 — 登入")
     st.caption("勾選「記住我」後將網頁加入手機主畫面或書籤，下次點開即可直接進入系統！")
     with st.container(border=True):
-        login_user = st.selectbox("👤 選擇帳號：", list(users_db.keys()))
+        # 顯示登入選單時，將工號轉換為具備中文姓名的選項
+        login_options = list(users_db.keys())
+        def format_user_label(u):
+            if u in users_db and "display_name" in users_db[u]:
+                return f"{u} ({users_db[u]['display_name']})"
+            return u
+
+        login_user = st.selectbox("👤 選擇帳號 / 輸入工號：", login_options, format_func=format_user_label)
         login_pwd = st.text_input("🔑 輸入密碼：", type="password")
         remember_me = st.checkbox("📌 在此裝置記住我的登入狀態", value=True)
         if st.button("🚀 登入", type="primary", use_container_width=True):
@@ -177,7 +189,8 @@ if not st.session_state.current_user:
                 st.error("密碼錯誤！")
     st.stop()
 
-current_user = st.session_state.current_user
+raw_current_user = st.session_state.current_user
+current_user = users_db.get(raw_current_user, {}).get("display_name", raw_current_user)
 
 @st.dialog("🎉 檔案匯入成功！")
 def show_upload_success_dialog(info):
@@ -468,7 +481,6 @@ with st.sidebar:
         up_c1 = st.selectbox("1. 第一層 (主夾)：", list(folder_tree.keys()))
         up_c2 = st.selectbox("2. 第二層 (次夾)：", list(folder_tree[up_c1].keys()))
         
-        # 第三層改為選填：加入 "(無細夾 / 直接放第二層)" 選項
         raw_c3_opts = folder_tree[up_c1][up_c2]
         c3_opts = ["(無細夾 / 直接放第二層)"] + (raw_c3_opts if isinstance(raw_c3_opts, list) else [])
         up_c3_selected = st.selectbox("3. 第三層 (細夾，可選無)：", c3_opts)
@@ -526,7 +538,6 @@ with st.sidebar:
                         if not c2_files:
                             continue
                         with st.expander(f"📂 {c2} ({len(c2_files)})", expanded=False):
-                            # 顯示直接放在第二層（無第三層）的檔案
                             no_c3_files = sorted([f for f, (fc1, fc2, fc3, _) in file_info_map.items() if fc1 == c1 and fc2 == c2 and not fc3])
                             if no_c3_files:
                                 st.markdown(f"**🏷️ (直接放第二層)** `({len(no_c3_files)})`")
@@ -627,7 +638,8 @@ with st.sidebar:
                 if st.button("🗑️ 刪細夾", use_container_width=True) and len(folder_tree[p3_c1][p3_c2]) > 1:
                     folder_tree[p3_c1][p3_c2].remove(target_c3)
                     for c in chunks:
-                        if c.get("cat1") == p3_c1 and c.get("cat2"] == p3_c2 and c.get("cat3") == target_c3:
+                        # 修正此處原本的語法錯誤
+                        if c.get("cat1") == p3_c1 and c.get("cat2") == p3_c2 and c.get("cat3") == target_c3:
                             c["cat3"] = ""
                     save_db(db)
                     st.rerun()
@@ -644,22 +656,29 @@ with st.sidebar:
                 save_db(db)
                 st.rerun()
 
-    if current_user == "聖引":
+    if raw_current_user == "聖引":
         with st.expander("👥 帳號管理 (聖引專屬)", expanded=False):
-            new_u = st.text_input("➕ 新增組員姓名：")
+            new_u = st.text_input("➕ 新增工號/帳號：")
+            new_name = st.text_input("設定中文姓名 (如：小明)：")
             new_p = st.text_input("設定密碼：", value=TEAM_PASSWORD)
-            if st.button("新增組員", use_container_width=True) and new_u.strip():
-                users_db[new_u.strip()] = {"password": new_p.strip() or TEAM_PASSWORD, "role": "一般組員"}
+            if st.button("新增帳號", use_container_width=True) and new_u.strip():
+                users_db[new_u.strip()] = {
+                    "password": new_p.strip() or TEAM_PASSWORD, 
+                    "role": "一般組員", 
+                    "display_name": new_name.strip() or new_u.strip()
+                }
                 save_db(db)
-                st.success(f"已新增：{new_u.strip()}")
+                st.success(f"已新增：{new_u.strip()} ({new_name})")
                 st.rerun()
             st.divider()
-            ed_u = st.selectbox("選擇組員：", list(users_db.keys()))
+            ed_u = st.selectbox("選擇帳號：", list(users_db.keys()))
+            ed_name = st.text_input("修改中文姓名：", value=users_db[ed_u].get("display_name", ed_u))
             ed_p = st.text_input("修改密碼：", value=users_db[ed_u]["password"])
             u1, u2 = st.columns(2)
             with u1:
-                if st.button("更新密碼", use_container_width=True):
+                if st.button("更新設定", use_container_width=True):
                     users_db[ed_u]["password"] = ed_p.strip() or TEAM_PASSWORD
+                    users_db[ed_u]["display_name"] = ed_name.strip() or ed_u
                     save_db(db)
                     st.success("已更新！")
                     st.rerun()
