@@ -205,7 +205,6 @@ max_mb_limit = db.get("max_mb", 80)
 # ================= AI 智慧自動分類路徑預測引擎 =================
 def auto_classify_folder(filename, folder_tree):
     fn = filename.lower()
-    # 1. 先比對使用者自訂的資料夾名稱是否直接出現在檔名中
     for c1, c2_dict in folder_tree.items():
         for c2, c3_list in c2_dict.items():
             for c3 in c3_list:
@@ -215,7 +214,6 @@ def auto_classify_folder(filename, folder_tree):
             if c2_clean and c2_clean in fn:
                 return c1, c2, (c3_list[0] if c3_list else "")
 
-    # 2. 工程實務關鍵字智慧配對規則
     rules = [
         (["日報", "自主檢查", "查驗"], "05_材料送審與查驗紀錄", "施工日報與查驗", "施工日報表"),
         (["送審", "試驗", "試體", "出廠", "型錄"], "05_材料送審與查驗紀錄", "材料送審資料", "材料送審核定"),
@@ -237,7 +235,6 @@ def auto_classify_folder(filename, folder_tree):
                 c3_use = target_c3 if target_c3 in c3_list else (c3_list[0] if c3_list else "")
                 return target_c1, c2_use, c3_use
 
-    # 3. 預設保底路徑
     def_c1 = list(folder_tree.keys())[0]
     def_c2 = list(folder_tree[def_c1].keys())[0]
     def_c3 = folder_tree[def_c1][def_c2][0] if folder_tree[def_c1][def_c2] else ""
@@ -482,7 +479,7 @@ def process_and_save_uploads(uploaded_files, mode="manual", target_c1="", target
         }
     return True
 
-# ================= 彈出視窗：匯入成功通知 ＆ 指定資料夾快傳 =================
+# ================= 彈出視窗：匯入通知、指定快傳、第三層細夾編輯 =================
 @st.dialog("🎉 檔案極速匯入成功！")
 def show_upload_success_dialog(info):
     st.success(f"✅ 已成功將 **{info['count']}** 份檔案寫入資料庫並自動同步至 GitHub！")
@@ -516,17 +513,56 @@ def show_quick_folder_upload_dialog(target_info):
         st.session_state.quick_upload_target = None
         st.rerun()
 
+@st.dialog("✏️ 編輯第三層細夾名稱")
+def show_edit_c3_dialog(edit_info):
+    ec1, ec2, ec3 = edit_info
+    st.caption(f"📍 所屬位置：`{ec1} > {ec2}`")
+    new_c3_val = st.text_input("✏️ 修改細夾名稱：", value=ec3)
+    col_e1, col_e2, col_e3 = st.columns(3)
+    with col_e1:
+        if st.button("💾 儲存名稱", type="primary", use_container_width=True):
+            clean_v = new_c3_val.strip()
+            if clean_v and clean_v != ec3:
+                idx = folder_tree[ec1][ec2].index(ec3)
+                folder_tree[ec1][ec2][idx] = clean_v
+                for c in chunks:
+                    if c.get("cat1") == ec1 and c.get("cat2") == ec2 and c.get("cat3") == ec3:
+                        c["cat3"] = clean_v
+                save_db(db)
+            st.session_state.edit_c3_target = None
+            st.rerun()
+    with col_e2:
+        if st.button("🗑️ 刪除此細夾", use_container_width=True):
+            if len(folder_tree[ec1][ec2]) > 1:
+                folder_tree[ec1][ec2].remove(ec3)
+                for c in chunks:
+                    if c.get("cat1") == ec1 and c.get("cat2") == ec2 and c.get("cat3") == ec3:
+                        c["cat3"] = ""
+                save_db(db)
+                st.session_state.edit_c3_target = None
+                st.rerun()
+            else:
+                st.warning("至少需保留一個細夾！")
+    with col_e3:
+        if st.button("✖️ 取消", use_container_width=True):
+            st.session_state.edit_c3_target = None
+            st.rerun()
+
 if "jump_to_file" not in st.session_state:
     st.session_state.jump_to_file = None
 if "uploader_key" not in st.session_state:
     st.session_state.uploader_key = 0
 if "quick_upload_target" not in st.session_state:
     st.session_state.quick_upload_target = None
+if "edit_c3_target" not in st.session_state:
+    st.session_state.edit_c3_target = None
 
 if st.session_state.get("upload_notice"):
     show_upload_success_dialog(st.session_state.upload_notice)
 elif st.session_state.get("quick_upload_target"):
     show_quick_folder_upload_dialog(st.session_state.quick_upload_target)
+elif st.session_state.get("edit_c3_target"):
+    show_edit_c3_dialog(st.session_state.edit_c3_target)
 
 # ================= 6. 全工項動態智慧聯想引擎 =================
 def expand_query_with_synonyms(query):
@@ -614,7 +650,7 @@ for c in chunks:
 
 db_size_mb = os.path.getsize(DB_FILE) / (1024 * 1024) if os.path.exists(DB_FILE) else 0.0
 
-# ================= 左側導覽與黃金組合直覺上傳區 =================
+# ================= 左側導覽：極速上傳 ＋ 展開即可就地編輯目錄 =================
 with st.sidebar:
     col_u1, col_u2 = st.columns([3, 2])
     with col_u1:
@@ -627,7 +663,7 @@ with st.sidebar:
 
     st.caption(f"📊 檔案：**{len(file_info_map)}** 份 ｜ 容量：**{db_size_mb:.2f} MB**")
 
-    # ★ 黃金組合 1：AI 智慧極速拖曳區（免選資料夾、拖拉即傳）
+    # ★ 黃金組合 1：AI 智慧極速拖曳區
     with st.expander("⚡ 智慧極速上傳 (AI 自動歸檔)", expanded=True):
         st.caption("💡 直接將多份檔案拖進下方框內，**手放開即自動依檔名分類並存入 GitHub**，免選資料夾、免按確認！")
         smart_ocr = st.checkbox("👁️ 掃描檔自動 AI 辨識 (OCR)", value=True, key="smart_ocr_chk")
@@ -641,7 +677,7 @@ with st.sidebar:
             if process_and_save_uploads(smart_files, mode="smart", enable_ocr=smart_ocr):
                 st.rerun()
 
-    # ★ 黃金組合 3：手動指定資料夾上傳（同樣支援拖拉即傳）
+    # ★ 黃金組合 3：手動指定資料夾上傳
     with st.expander("➕ 手動指定資料夾上傳", expanded=False):
         up_c1 = st.selectbox("1. 第一層 (主夾)：", list(folder_tree.keys()))
         up_c2 = st.selectbox("2. 第二層 (次夾)：", list(folder_tree[up_c1].keys()))
@@ -673,20 +709,97 @@ with st.sidebar:
                     if process_and_save_uploads(uploaded_files, mode="manual", target_c1=up_c1, target_c2=up_c2, target_c3=up_c3, enable_ocr=enable_ocr_upload):
                         st.rerun()
 
-    # ★ 黃金組合 2：目錄資料夾旁直接點「📥」傳入該夾
-    with st.expander("📁 目錄 (點 📥 可直接傳入該夾)", expanded=True):
-        st.caption("💡 點資料夾旁 `📥` 可直接丟檔案進去；點檔名可直接閱讀：")
-        show_empty_dirs = st.checkbox("顯示尚無檔案的空資料夾", value=True)
-        for c1, c2_dict in folder_tree.items():
+    # ★ 升級亮點：展開目錄即可「直接原地改名、新增子夾、刪除」＋ 點 📥 直接傳
+    with st.expander("📁 目錄 (展開可直接改名 / 點 📥 快傳)", expanded=True):
+        st.caption("💡 展開資料夾可**直接改名或新增子夾**；點 `📥` 直接傳檔：")
+        
+        c_top1, c_top2 = st.columns([3, 2])
+        with c_top1:
+            show_empty_dirs = st.checkbox("顯示空資料夾", value=True)
+        with c_top2:
+            with st.popover("➕ 新增主夾", use_container_width=True):
+                quick_new_c1 = st.text_input("輸入新第1層主夾名稱：", key="q_add_c1")
+                if st.button("確認新增", key="btn_q_add_c1", type="primary", use_container_width=True) and quick_new_c1.strip():
+                    if quick_new_c1.strip() not in folder_tree:
+                        folder_tree[quick_new_c1.strip()] = {"預設次夾": ["一般文件"]}
+                        save_db(db)
+                        st.rerun()
+
+        for c1, c2_dict in list(folder_tree.items()):
             c1_files = [f for f, (fc1, _, _, _) in file_info_map.items() if fc1 == c1]
             if not show_empty_dirs and not c1_files:
                 continue
             with st.expander(f"🗂️ {c1} ({len(c1_files)})", expanded=False):
-                for c2, c3_list in c2_dict.items():
+                # ★ 第一層展開後：直接原地編輯按鈕 (Popover)
+                with st.popover(f"✏️ 管理「{c1}」(改名 / 新增次夾 / 刪除)", use_container_width=True):
+                    ren_c1_val = st.text_input("✏️ 修改第1層主夾名稱：", value=c1, key=f"in_ren_c1_{c1}")
+                    if st.button("💾 儲存主夾名稱", key=f"btn_ren_c1_{c1}", type="primary", use_container_width=True):
+                        clean_c1 = ren_c1_val.strip()
+                        if clean_c1 and clean_c1 != c1:
+                            db["folder_tree"] = {(clean_c1 if k == c1 else k): v for k, v in folder_tree.items()}
+                            for c in chunks:
+                                if c.get("cat1") == c1:
+                                    c["cat1"] = clean_c1
+                            save_db(db)
+                            st.rerun()
+                    st.divider()
+                    add_c2_val = st.text_input("➕ 在此主夾下新增「第2層次夾」：", key=f"in_add_c2_{c1}")
+                    if st.button("➕ 新增次夾", key=f"btn_add_c2_{c1}", use_container_width=True) and add_c2_val.strip():
+                        if add_c2_val.strip() not in folder_tree[c1]:
+                            folder_tree[c1][add_c2_val.strip()] = ["一般文件"]
+                            save_db(db)
+                            st.rerun()
+                    st.divider()
+                    if st.button("🗑️ 刪除此主夾", key=f"btn_del_c1_{c1}", use_container_width=True):
+                        if len(folder_tree) > 1:
+                            del folder_tree[c1]
+                            fb1 = list(folder_tree.keys())[0]
+                            fb2 = list(folder_tree[fb1].keys())[0]
+                            for c in chunks:
+                                if c.get("cat1") == c1:
+                                    c["cat1"], c["cat2"], c["cat3"] = fb1, fb2, ""
+                            save_db(db)
+                            st.rerun()
+                        else:
+                            st.warning("至少需保留一個主夾！")
+
+                for c2, c3_list in list(c2_dict.items()):
                     c2_files = [f for f, (fc1, fc2, _, _) in file_info_map.items() if fc1 == c1 and fc2 == c2]
                     if not show_empty_dirs and not c2_files:
                         continue
                     with st.expander(f"📂 {c2} ({len(c2_files)})", expanded=False):
+                        # ★ 第二層展開後：直接原地編輯按鈕 (Popover)
+                        with st.popover(f"✏️ 管理「{c2}」(改名 / 新增細夾 / 刪除)", use_container_width=True):
+                            ren_c2_val = st.text_input("✏️ 修改第2層次夾名稱：", value=c2, key=f"in_ren_c2_{c1}_{c2}")
+                            if st.button("💾 儲存次夾名稱", key=f"btn_ren_c2_{c1}_{c2}", type="primary", use_container_width=True):
+                                clean_c2 = ren_c2_val.strip()
+                                if clean_c2 and clean_c2 != c2:
+                                    folder_tree[c1] = {(clean_c2 if k == c2 else k): v for k, v in folder_tree[c1].items()}
+                                    for c in chunks:
+                                        if c.get("cat1") == c1 and c.get("cat2") == c2:
+                                            c["cat2"] = clean_c2
+                                    save_db(db)
+                                    st.rerun()
+                            st.divider()
+                            add_c3_val = st.text_input("➕ 在此次夾下新增「第3層細夾」：", key=f"in_add_c3_{c1}_{c2}")
+                            if st.button("➕ 新增細夾", key=f"btn_add_c3_{c1}_{c2}", use_container_width=True) and add_c3_val.strip():
+                                if add_c3_val.strip() not in folder_tree[c1][c2]:
+                                    folder_tree[c1][c2].append(add_c3_val.strip())
+                                    save_db(db)
+                                    st.rerun()
+                            st.divider()
+                            if st.button("🗑️ 刪除此次夾", key=f"btn_del_c2_{c1}_{c2}", use_container_width=True):
+                                if len(folder_tree[c1]) > 1:
+                                    del folder_tree[c1][c2]
+                                    fb2 = list(folder_tree[c1].keys())[0]
+                                    for c in chunks:
+                                        if c.get("cat1") == c1 and c.get("cat2") == c2:
+                                            c["cat2"], c["cat3"] = fb2, ""
+                                    save_db(db)
+                                    st.rerun()
+                                else:
+                                    st.warning("至少需保留一個次夾！")
+
                         # 第二層直接上傳按鈕
                         col_d2_title, col_d2_btn = st.columns([4, 1])
                         with col_d2_title:
@@ -700,15 +813,19 @@ with st.sidebar:
                             if st.button(f"📄 {f}", key=f"dir_{c1}_{c2}_none_{f}", use_container_width=True):
                                 st.session_state.jump_to_file = f
 
-                        # 第三層細夾列表與專屬 📥 按鈕
-                        for c3 in c3_list:
+                        # 第三層細夾列表：右側同時提供 ✏️(改名) 與 📥(快傳)
+                        for c3 in list(c3_list):
                             c3_files = sorted([f for f, (fc1, fc2, fc3, _) in file_info_map.items() if fc1 == c1 and fc2 == c2 and fc3 == c3])
                             if not show_empty_dirs and not c3_files:
                                 continue
-                            col_d3_title, col_d3_btn = st.columns([4, 1])
+                            col_d3_title, col_d3_edit, col_d3_up = st.columns([3.2, 0.9, 0.9])
                             with col_d3_title:
                                 st.markdown(f"**🏷️ {c3}** `({len(c3_files)})`")
-                            with col_d3_btn:
+                            with col_d3_edit:
+                                if st.button("✏️", key=f"edc3_{c1}_{c2}_{c3}", help=f"改名或刪除細夾：{c3}"):
+                                    st.session_state.edit_c3_target = (c1, c2, c3)
+                                    st.rerun()
+                            with col_d3_up:
                                 if st.button("📥", key=f"qup_{c1}_{c2}_{c3}", help=f"直接上傳檔案至：{c1} > {c2} > {c3}"):
                                     st.session_state.quick_upload_target = (c1, c2, c3)
                                     st.rerun()
@@ -720,107 +837,17 @@ with st.sidebar:
         st.markdown("[📁 每日施工照片雲端夾](https://drive.google.com/drive/folders/1MFrIjPZB3cBWBb2Nt_q2eaTRDw7zzno9?usp=drive_link)")
         st.markdown("[📁 每日日報更新雲端夾](https://drive.google.com/drive/folders/1vmmaXftLfCTT3fd5_x_sIl6jc9KrEATX?usp=drive_link)")
 
-    with st.expander("⚙️ 資料夾設定", expanded=False):
-        t1, t2, t3, t4 = st.tabs(["第1層", "第2層", "第3層", "防呆/快捷"])
-        with t1:
-            new_c1 = st.text_input("➕ 新增第1層主夾：")
-            if st.button("新增主夾", use_container_width=True) and new_c1.strip():
-                if new_c1.strip() not in folder_tree:
-                    folder_tree[new_c1.strip()] = {"預設次夾": ["一般文件"]}
-                    save_db(db)
-                    st.rerun()
-            target_c1 = st.selectbox("選擇第1層主夾：", list(folder_tree.keys()), key="s_c1")
-            rename_c1 = st.text_input("改名主夾：", value=target_c1)
-            ca, cb = st.columns(2)
-            with ca:
-                if st.button("儲存主夾", use_container_width=True) and rename_c1.strip():
-                    db["folder_tree"] = {(rename_c1.strip() if k == target_c1 else k): v for k, v in folder_tree.items()}
-                    for c in chunks:
-                        if c.get("cat1") == target_c1:
-                            c["cat1"] = rename_c1.strip()
-                    save_db(db)
-                    st.rerun()
-            with cb:
-                if st.button("🗑️ 刪主夾", use_container_width=True) and len(folder_tree) > 1:
-                    del folder_tree[target_c1]
-                    fb1 = list(folder_tree.keys())[0]
-                    fb2 = list(folder_tree[fb1].keys())[0]
-                    for c in chunks:
-                        if c.get("cat1") == target_c1:
-                            c["cat1"], c["cat2"], c["cat3"] = fb1, fb2, ""
-                    save_db(db)
-                    st.rerun()
-
-        with t2:
-            p_c1 = st.selectbox("所屬第1層主夾：", list(folder_tree.keys()), key="p2_c1")
-            new_c2 = st.text_input("➕ 新增第2層次夾：")
-            if st.button("新增次夾", use_container_width=True) and new_c2.strip():
-                if new_c2.strip() not in folder_tree[p_c1]:
-                    folder_tree[p_c1][new_c2.strip()] = ["一般文件"]
-                    save_db(db)
-                    st.rerun()
-            target_c2 = st.selectbox("選擇第2層次夾：", list(folder_tree[p_c1].keys()), key="s_c2")
-            rename_c2 = st.text_input("改名次夾：", value=target_c2)
-            cc, cd = st.columns(2)
-            with cc:
-                if st.button("儲存次夾", use_container_width=True) and rename_c2.strip():
-                    folder_tree[p_c1] = {(rename_c2.strip() if k == target_c2 else k): v for k, v in folder_tree[p_c1].items()}
-                    for c in chunks:
-                        if c.get("cat1") == p_c1 and c.get("cat2") == target_c2:
-                            c["cat2"] = rename_c2.strip()
-                    save_db(db)
-                    st.rerun()
-            with cd:
-                if st.button("🗑️ 刪次夾", use_container_width=True) and len(folder_tree[p_c1]) > 1:
-                    del folder_tree[p_c1][target_c2]
-                    fb2 = list(folder_tree[p_c1].keys())[0]
-                    for c in chunks:
-                        if c.get("cat1") == p_c1 and c.get("cat2") == target_c2:
-                            c["cat2"], c["cat3"] = fb2, ""
-                    save_db(db)
-                    st.rerun()
-
-        with t3:
-            p3_c1 = st.selectbox("所屬第1層：", list(folder_tree.keys()), key="p3_c1")
-            p3_c2 = st.selectbox("所屬第2層：", list(folder_tree[p3_c1].keys()), key="p3_c2")
-            new_c3 = st.text_input("➕ 新增第3層細夾：")
-            if st.button("新增細夾", use_container_width=True) and new_c3.strip():
-                if new_c3.strip() not in folder_tree[p3_c1][p3_c2]:
-                    folder_tree[p3_c1][p3_c2].append(new_c3.strip())
-                    save_db(db)
-                    st.rerun()
-            target_c3 = st.selectbox("選擇第3層細夾：", folder_tree[p3_c1][p3_c2], key="s_c3")
-            rename_c3 = st.text_input("改名細夾：", value=target_c3)
-            ce, cf = st.columns(2)
-            with ce:
-                if st.button("儲存細夾", use_container_width=True) and rename_c3.strip():
-                    idx = folder_tree[p3_c1][p3_c2].index(target_c3)
-                    folder_tree[p3_c1][p3_c2][idx] = rename_c3.strip()
-                    for c in chunks:
-                        if c.get("cat1") == p3_c1 and c.get("cat2") == p3_c2 and c.get("cat3") == target_c3:
-                            c["cat3"] = rename_c3.strip()
-                    save_db(db)
-                    st.rerun()
-            with cf:
-                if st.button("🗑️ 刪細夾", use_container_width=True) and len(folder_tree[p3_c1][p3_c2]) > 1:
-                    folder_tree[p3_c1][p3_c2].remove(target_c3)
-                    for c in chunks:
-                        if c.get("cat1") == p3_c1 and c.get("cat2") == p3_c2 and c.get("cat3") == target_c3:
-                            c["cat3"] = ""
-                    save_db(db)
-                    st.rerun()
-
-        with t4:
-            new_max_mb = st.slider("單檔防呆上限 (MB)：", 20, 200, int(max_mb_limit), 10)
-            if new_max_mb != max_mb_limit:
-                db["max_mb"] = new_max_mb
-                save_db(db)
-                st.rerun()
-            sc_str = st.text_area("自訂首頁快捷鈕（一行一個）：", value="\n".join(db.get("shortcuts", DEFAULT_SHORTCUTS)))
-            if st.button("儲存快捷鈕", use_container_width=True):
-                db["shortcuts"] = [s.strip() for s in sc_str.split("\n") if s.strip()]
-                save_db(db)
-                st.rerun()
+    with st.expander("⚙️ 防呆上限與首頁快捷設定", expanded=False):
+        new_max_mb = st.slider("單檔防呆上限 (MB)：", 20, 200, int(max_mb_limit), 10)
+        if new_max_mb != max_mb_limit:
+            db["max_mb"] = new_max_mb
+            save_db(db)
+            st.rerun()
+        sc_str = st.text_area("自訂首頁快捷鈕（一行一個）：", value="\n".join(db.get("shortcuts", DEFAULT_SHORTCUTS)))
+        if st.button("儲存快捷鈕", use_container_width=True):
+            db["shortcuts"] = [s.strip() for s in sc_str.split("\n") if s.strip()]
+            save_db(db)
+            st.rerun()
 
     if raw_current_user == "聖引":
         with st.expander("👥 帳號管理 (聖引專屬)", expanded=False):
