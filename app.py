@@ -3,6 +3,8 @@ import io
 import re
 import hashlib
 import pickle
+import base64
+import requests
 import streamlit as st
 from google import genai
 from google.genai import types
@@ -30,6 +32,8 @@ div[data-testid="stSidebar"] div.stButton > button {
 
 TEAM_PASSWORD = st.secrets.get("TEAM_PASSWORD", "1234")
 GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY", "").strip()
+GITHUB_TOKEN = st.secrets.get("GITHUB_TOKEN", "").strip()
+GITHUB_REPO = st.secrets.get("GITHUB_REPO", "").strip()
 DB_FILE = "engineering_knowledge_db.pkl"
 
 AVAILABLE_MODELS = ["gemini-3.5-flash-lite", "gemini-3.8-flash", "gemini-3.5-flash"]
@@ -37,7 +41,7 @@ AVAILABLE_MODELS = ["gemini-3.5-flash-lite", "gemini-3.8-flash", "gemini-3.5-fla
 DEFAULT_FOLDER_TREE_V7 = {
     "01_招標文件與契約": {
         "第一次公告版本": ["契約條款", "投標與評選須知", "施工規範與圖說"],
-        "第二次公告版本": ["契約條款", "投標與評選須知", "補充規定与附件"]
+        "第二次公告版本": ["契約條款", "投標與評選須知", "補充規定與附件"]
     },
     "02_施工規範與圖說": {
         "土建與水工": ["一般規範", "設計圖說"],
@@ -86,6 +90,41 @@ ENGINEERING_SYNONYMS = {
     "里程碑": ["分項", "節點", "竣工", "期限", "工期"]
 }
 
+# ================= 自動 GitHub 同步備份機制 =================
+def pull_db_from_github():
+    if not GITHUB_TOKEN or not GITHUB_REPO:
+        return None
+    url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{DB_FILE}?ref=main"
+    headers = {"Authorization": f"Bearer {GITHUB_TOKEN}", "Accept": "application/vnd.github.v3+json"}
+    try:
+        r = requests.get(url, headers=headers, timeout=10)
+        if r.status_code == 200:
+            content_b64 = r.json().get("content", "")
+            if content_b64:
+                return base64.b64decode(content_b64)
+    except Exception:
+        pass
+    return None
+
+def push_db_to_github(db_bytes):
+    if not GITHUB_TOKEN or not GITHUB_REPO:
+        return
+    url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{DB_FILE}"
+    headers = {"Authorization": f"Bearer {GITHUB_TOKEN}", "Accept": "application/vnd.github.v3+json"}
+    try:
+        r_get = requests.get(url, headers=headers, timeout=10)
+        sha = r_get.json().get("sha", "") if r_get.status_code == 200 else ""
+        data = {
+            "message": "🔄 Auto-sync CV02 Database from Streamlit",
+            "content": base64.b64encode(db_bytes).decode("utf-8"),
+            "branch": "main"
+        }
+        if sha:
+            data["sha"] = sha
+        requests.put(url, headers=headers, json=data, timeout=15)
+    except Exception:
+        pass
+
 def make_token(username, password):
     raw = f"{username}:{password}:cv02_salt"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
@@ -106,6 +145,12 @@ def ensure_three_level_tree(raw_tree):
     return new_tree
 
 def load_db():
+    if not os.path.exists(DB_FILE) and GITHUB_TOKEN and GITHUB_REPO:
+        remote_bytes = pull_db_from_github()
+        if remote_bytes:
+            with open(DB_FILE, "wb") as f:
+                f.write(remote_bytes)
+
     if os.path.exists(DB_FILE):
         try:
             with open(DB_FILE, "rb") as f:
@@ -147,10 +192,58 @@ def load_db():
 def save_db(db_dict):
     with open(DB_FILE, "wb") as f:
         pickle.dump(db_dict, f)
+    if GITHUB_TOKEN and GITHUB_REPO:
+        with open(DB_FILE, "rb") as f:
+            push_db_to_github(f.read())
 
 db = load_db()
 users_db = db["users"]
+folder_tree = db["folder_tree"]
+chunks = db["chunks"]
+max_mb_limit = db.get("max_mb", 80)
 
+# ================= AI 智慧自動分類路徑預測引擎 =================
+def auto_classify_folder(filename, folder_tree):
+    fn = filename.lower()
+    # 1. 先比對使用者自訂的資料夾名稱是否直接出現在檔名中
+    for c1, c2_dict in folder_tree.items():
+        for c2, c3_list in c2_dict.items():
+            for c3 in c3_list:
+                if c3.lower() in fn:
+                    return c1, c2, c3
+            c2_clean = re.sub(r"^\d+_", "", c2).lower()
+            if c2_clean and c2_clean in fn:
+                return c1, c2, (c3_list[0] if c3_list else "")
+
+    # 2. 工程實務關鍵字智慧配對規則
+    rules = [
+        (["日報", "自主檢查", "查驗"], "05_材料送審與查驗紀錄", "施工日報與查驗", "施工日報表"),
+        (["送審", "試驗", "試體", "出廠", "型錄"], "05_材料送審與查驗紀錄", "材料送審資料", "材料送審核定"),
+        (["會議", "現勘", "紀錄", "討論會"], "04_會議紀錄與簡報", "工務會議紀錄", "歷次會議紀錄"),
+        (["簡報", "週會", "月會", "進度", "ppt"], "04_會議紀錄與簡報", "專案進度簡報", "週會與月會簡報"),
+        (["變更", "議價", "新增單價", "修正契約"], "03_設計變更與核定公文", "契約變更設計", "變更設計圖說"),
+        (["函", "公文", "來文", "發文", "備忘錄", "簽"], "03_設計變更與核定公文", "重要往來公文", "業主來文"),
+        (["職安", "安衛", "環保", "安全"], "02_施工規範與圖說", "職安衛與環保", "職安衛規定"),
+        (["機電", "弱電", "電氣", "空調", "消防"], "02_施工規範與圖說", "機電與弱電", "設備規範"),
+        (["規範", "圖說", "施工", "結構", "土建", "水工"], "02_施工規範與圖說", "土建與水工", "一般規範"),
+        (["契約", "投標", "招標", "須知", "價目表", "預算", "單價"], "01_招標文件與契約", "第二次公告版本", "契約條款"),
+    ]
+    for kws, target_c1, target_c2, target_c3 in rules:
+        if any(k in fn for k in kws):
+            if target_c1 in folder_tree:
+                c2_dict = folder_tree[target_c1]
+                c2_use = target_c2 if target_c2 in c2_dict else list(c2_dict.keys())[0]
+                c3_list = c2_dict[c2_use]
+                c3_use = target_c3 if target_c3 in c3_list else (c3_list[0] if c3_list else "")
+                return target_c1, c2_use, c3_use
+
+    # 3. 預設保底路徑
+    def_c1 = list(folder_tree.keys())[0]
+    def_c2 = list(folder_tree[def_c1].keys())[0]
+    def_c3 = folder_tree[def_c1][def_c2][0] if folder_tree[def_c1][def_c2] else ""
+    return def_c1, def_c2, def_c3
+
+# ================= 登入驗證 =================
 if "current_user" not in st.session_state:
     st.session_state.current_user = None
 
@@ -190,22 +283,7 @@ if not st.session_state.current_user:
 raw_current_user = st.session_state.current_user
 current_user = users_db.get(raw_current_user, {}).get("display_name", raw_current_user)
 
-@st.dialog("🎉 檔案匯入成功！")
-def show_upload_success_dialog(info):
-    st.success(f"✅ 已成功將 **{info['count']}** 份檔案寫入工程資料庫！")
-    st.markdown(f"**📂 歸檔路徑：** `{info['path']}`")
-    if info.get("ocr_pages", 0) > 0:
-        st.info(f"👁️ 內含 **{info['ocr_pages']}** 頁掃描影像，已自動透過 AI 視覺辨識轉為可搜尋文字！")
-    st.markdown("**📄 本次匯入檔案清單：**")
-    for fn in info.get("files", []):
-        st.markdown(f"- `{fn}`")
-    if st.button("👌 我知道了", type="primary", use_container_width=True):
-        st.session_state.upload_notice = None
-        st.rerun()
-
-if st.session_state.get("upload_notice"):
-    show_upload_success_dialog(st.session_state.upload_notice)
-
+# ================= 檔案解析與匯入核心函數 =================
 def ocr_with_gemini(file_bytes, mime_type):
     if not GEMINI_API_KEY:
         return ""
@@ -368,6 +446,88 @@ def extract_text_from_file(uploaded_file, cat1, cat2, cat3, uploader, enable_ocr
 
     return text_chunks, 0
 
+def process_and_save_uploads(uploaded_files, mode="manual", target_c1="", target_c2="", target_c3="", enable_ocr=True):
+    oversized = [uf.name for uf in uploaded_files if (uf.size / (1024 * 1024)) > max_mb_limit]
+    img_count = sum(1 for uf in uploaded_files if uf.name.lower().endswith((".jpg", ".jpeg", ".png")))
+    if oversized:
+        st.error(f"⚠️ 超過 {max_mb_limit}MB 上限：\n" + "、".join(oversized))
+        return False
+    if img_count > 10:
+        st.warning(f"⚠️ 一次選擇了 {img_count} 張圖片，建議單次 10 張以內！")
+        return False
+
+    with st.spinner("⚡ 正在極速解析內容並自動同步備份至 GitHub..."):
+        imported_details = []
+        total_ocr = 0
+        for uf in uploaded_files:
+            if mode == "smart":
+                c1, c2, c3 = auto_classify_folder(uf.name, folder_tree)
+            else:
+                c1, c2, c3 = target_c1, target_c2, target_c3
+
+            db["chunks"] = [c for c in db["chunks"] if c["file_name"] != uf.name]
+            new_chunks, ocr_cnt = extract_text_from_file(uf, c1, c2, c3, current_user, enable_ocr=enable_ocr)
+            if new_chunks:
+                db["chunks"].extend(new_chunks)
+                path_label = f"{c1} > {c2}" + (f" > {c3}" if c3 else " (第二層)")
+                imported_details.append(f"`{uf.name}` ➔ 📂 **{path_label}**")
+                total_ocr += ocr_cnt
+
+        save_db(db)
+        st.session_state.uploader_key += 1
+        st.session_state.upload_notice = {
+            "count": len(imported_details),
+            "files": imported_details,
+            "ocr_pages": total_ocr
+        }
+    return True
+
+# ================= 彈出視窗：匯入成功通知 ＆ 指定資料夾快傳 =================
+@st.dialog("🎉 檔案極速匯入成功！")
+def show_upload_success_dialog(info):
+    st.success(f"✅ 已成功將 **{info['count']}** 份檔案寫入資料庫並自動同步至 GitHub！")
+    if info.get("ocr_pages", 0) > 0:
+        st.info(f"👁️ 內含 **{info['ocr_pages']}** 頁掃描影像，已透過 AI 視覺辨識轉為可搜尋文字！")
+    st.markdown("**📄 本次歸檔清單與路徑（若想換位置可於目錄點擊改名/搬移）：**")
+    for item_str in info.get("files", []):
+        st.markdown(f"- {item_str}")
+    if st.button("👌 太棒了，我知道了", type="primary", use_container_width=True):
+        st.session_state.upload_notice = None
+        st.rerun()
+
+@st.dialog("📥 直接傳入此資料夾（拖拉放開即自動匯入）")
+def show_quick_folder_upload_dialog(target_info):
+    tc1, tc2, tc3 = target_info
+    path_str = f"{tc1} > {tc2}" + (f" > {tc3}" if tc3 else " (直接放第二層)")
+    st.markdown(f"📂 **目標鎖定路徑：** `{path_str}`")
+    st.caption("💡 直接將電腦中的檔案拖拉進下方框內，**手放開就會立刻自動開始匯入**，免按確認鈕！")
+    q_ocr = st.checkbox("👁️ 掃描檔自動 AI 光學辨識 (OCR)", value=True, key="q_dlg_ocr")
+    q_files = st.file_uploader(
+        "請拖曳或選擇檔案：",
+        type=["pdf", "docx", "pptx", "xlsx", "txt", "jpg", "jpeg", "png"],
+        accept_multiple_files=True,
+        key=f"q_dlg_up_{st.session_state.uploader_key}"
+    )
+    if q_files:
+        if process_and_save_uploads(q_files, mode="manual", target_c1=tc1, target_c2=tc2, target_c3=tc3, enable_ocr=q_ocr):
+            st.session_state.quick_upload_target = None
+            st.rerun()
+    if st.button("✖️ 取消關閉", use_container_width=True):
+        st.session_state.quick_upload_target = None
+        st.rerun()
+
+if "jump_to_file" not in st.session_state:
+    st.session_state.jump_to_file = None
+if "uploader_key" not in st.session_state:
+    st.session_state.uploader_key = 0
+if "quick_upload_target" not in st.session_state:
+    st.session_state.quick_upload_target = None
+
+if st.session_state.get("upload_notice"):
+    show_upload_success_dialog(st.session_state.upload_notice)
+elif st.session_state.get("quick_upload_target"):
+    show_quick_folder_upload_dialog(st.session_state.quick_upload_target)
+
 # ================= 6. 全工項動態智慧聯想引擎 =================
 def expand_query_with_synonyms(query):
     expanded = query
@@ -391,7 +551,7 @@ def expand_query_with_synonyms(query):
 
 def search_internal_db(query, chunks, selected_cat1s, selected_cat2s, selected_cat3s):
     if not chunks:
-        return "（目前內部目錄尚無檔案，請先從左側『➕ 上傳』新增檔案）"
+        return "（目前內部目錄尚無檔案，請先從左側上傳檔案）"
 
     filtered_chunks = [
         c for c in chunks
@@ -441,10 +601,6 @@ def highlight_keywords(text, keywords):
             )
     return highlighted
 
-folder_tree = db["folder_tree"]
-chunks = db["chunks"]
-max_mb_limit = db.get("max_mb", 80)
-
 file_info_map = {}
 for c in chunks:
     c1 = c.get("cat1", list(folder_tree.keys())[0])
@@ -458,11 +614,7 @@ for c in chunks:
 
 db_size_mb = os.path.getsize(DB_FILE) / (1024 * 1024) if os.path.exists(DB_FILE) else 0.0
 
-if "jump_to_file" not in st.session_state:
-    st.session_state.jump_to_file = None
-if "uploader_key" not in st.session_state:
-    st.session_state.uploader_key = 0
-
+# ================= 左側導覽與黃金組合直覺上傳區 =================
 with st.sidebar:
     col_u1, col_u2 = st.columns([3, 2])
     with col_u1:
@@ -475,85 +627,98 @@ with st.sidebar:
 
     st.caption(f"📊 檔案：**{len(file_info_map)}** 份 ｜ 容量：**{db_size_mb:.2f} MB**")
 
-    with st.expander("☁️ 專案雲端資料夾捷徑", expanded=False):
-        st.markdown("[📁 每日施工照片雲端夾](https://drive.google.com/drive/folders/1MFrIjPZB3cBWBb2Nt_q2eaTRDw7zzno9?usp=drive_link)")
-        st.markdown("[📁 每日日報更新雲端夾](https://drive.google.com/drive/folders/1vmmaXftLfCTT3fd5_x_sIl6jc9KrEATX?usp=drive_link)")
+    # ★ 黃金組合 1：AI 智慧極速拖曳區（免選資料夾、拖拉即傳）
+    with st.expander("⚡ 智慧極速上傳 (AI 自動歸檔)", expanded=True):
+        st.caption("💡 直接將多份檔案拖進下方框內，**手放開即自動依檔名分類並存入 GitHub**，免選資料夾、免按確認！")
+        smart_ocr = st.checkbox("👁️ 掃描檔自動 AI 辨識 (OCR)", value=True, key="smart_ocr_chk")
+        smart_files = st.file_uploader(
+            f"拖拉檔案至此 (單檔上限 {max_mb_limit}MB)",
+            type=["pdf", "docx", "pptx", "xlsx", "txt", "jpg", "jpeg", "png"],
+            accept_multiple_files=True,
+            key=f"smart_up_{st.session_state.uploader_key}"
+        )
+        if smart_files:
+            if process_and_save_uploads(smart_files, mode="smart", enable_ocr=smart_ocr):
+                st.rerun()
 
-    with st.expander("➕ 上傳", expanded=False):
+    # ★ 黃金組合 3：手動指定資料夾上傳（同樣支援拖拉即傳）
+    with st.expander("➕ 手動指定資料夾上傳", expanded=False):
         up_c1 = st.selectbox("1. 第一層 (主夾)：", list(folder_tree.keys()))
         up_c2 = st.selectbox("2. 第二層 (次夾)：", list(folder_tree[up_c1].keys()))
-        
         raw_c3_opts = folder_tree[up_c1][up_c2]
-        c3_opts = ["(無細夾 / 直接放第二層)"] + (raw_c3_opts if isinstance(raw_c3_opts, list) else [])
+        c3_opts = ["(無細夾 /直接放第二層)"] + (raw_c3_opts if isinstance(raw_c3_opts, list) else [])
         up_c3_selected = st.selectbox("3. 第三層 (細夾，可選無)：", c3_opts)
-        up_c3 = "" if up_c3_selected == "(無細夾 / 直接放第二層)" else up_c3_selected
+        up_c3 = "" if up_c3_selected == "(無細夾 /直接放第二層)" else up_c3_selected
 
-        enable_ocr_upload = st.checkbox("👁️ 掃描檔自動 AI 光學辨識 (OCR)", value=True)
+        c_chk1, c_chk2 = st.columns(2)
+        with c_chk1:
+            enable_ocr_upload = st.checkbox("👁️ 自動 OCR", value=True)
+        with c_chk2:
+            auto_submit_manual = st.checkbox("⚡ 選完即傳", value=True)
+
         uploaded_files = st.file_uploader(
             f"4. 選擇檔案 (上限 {max_mb_limit}MB)",
             type=["pdf", "docx", "pptx", "xlsx", "txt", "jpg", "jpeg", "png"],
             accept_multiple_files=True,
             key=f"file_up_{st.session_state.uploader_key}"
         )
-        if st.button("🚀 匯入資料庫", type="primary", use_container_width=True):
-            if not uploaded_files:
-                st.warning("請先選擇檔案！")
-            else:
-                oversized = [uf.name for uf in uploaded_files if (uf.size / (1024 * 1024)) > max_mb_limit]
-                img_count = sum(1 for uf in uploaded_files if uf.name.lower().endswith((".jpg", ".jpeg", ".png")))
-                if oversized:
-                    st.error(f"⚠️ 超過 {max_mb_limit}MB 上限：\n" + "、".join(oversized))
-                elif img_count > 10:
-                    st.warning(f"⚠️ 一次選擇了 {img_count} 張圖片，建議單次 10 張以內！")
+        if uploaded_files and auto_submit_manual:
+            if process_and_save_uploads(uploaded_files, mode="manual", target_c1=up_c1, target_c2=up_c2, target_c3=up_c3, enable_ocr=enable_ocr_upload):
+                st.rerun()
+        elif not auto_submit_manual:
+            if st.button("🚀 匯入資料庫", type="primary", use_container_width=True):
+                if not uploaded_files:
+                    st.warning("請先選擇檔案！")
                 else:
-                    with st.spinner("正在解析內容並建立索引..."):
-                        imported_names, total_ocr = [], 0
-                        for uf in uploaded_files:
-                            db["chunks"] = [c for c in db["chunks"] if c["file_name"] != uf.name]
-                            new_chunks, ocr_cnt = extract_text_from_file(uf, up_c1, up_c2, up_c3, current_user, enable_ocr=enable_ocr_upload)
-                            if new_chunks:
-                                db["chunks"].extend(new_chunks)
-                                imported_names.append(uf.name)
-                                total_ocr += ocr_cnt
-                        save_db(db)
-                        st.session_state.uploader_key += 1
-                        st.session_state.upload_notice = {
-                            "count": len(imported_names),
-                            "files": imported_names,
-                            "path": f"{up_c1} > {up_c2}" + (f" > {up_c3}" if up_c3 else " (第二層)"),
-                            "ocr_pages": total_ocr
-                        }
+                    if process_and_save_uploads(uploaded_files, mode="manual", target_c1=up_c1, target_c2=up_c2, target_c3=up_c3, enable_ocr=enable_ocr_upload):
                         st.rerun()
 
-    with st.expander("📁 目錄", expanded=True):
-        if not file_info_map:
-            st.caption("目前尚無檔案，請點上方「➕ 上傳」。")
-        else:
-            st.caption("💡 點擊資料夾可展開/收合，點檔名直接閱讀：")
-            for c1, c2_dict in folder_tree.items():
-                c1_files = [f for f, (fc1, _, _, _) in file_info_map.items() if fc1 == c1]
-                if not c1_files:
-                    continue
-                with st.expander(f"🗂️ {c1} ({len(c1_files)})", expanded=False):
-                    for c2, c3_list in c2_dict.items():
-                        c2_files = [f for f, (fc1, fc2, _, _) in file_info_map.items() if fc1 == c1 and fc2 == c2]
-                        if not c2_files:
-                            continue
-                        with st.expander(f"📂 {c2} ({len(c2_files)})", expanded=False):
+    # ★ 黃金組合 2：目錄資料夾旁直接點「📥」傳入該夾
+    with st.expander("📁 目錄 (點 📥 可直接傳入該夾)", expanded=True):
+        st.caption("💡 點資料夾旁 `📥` 可直接丟檔案進去；點檔名可直接閱讀：")
+        show_empty_dirs = st.checkbox("顯示尚無檔案的空資料夾", value=True)
+        for c1, c2_dict in folder_tree.items():
+            c1_files = [f for f, (fc1, _, _, _) in file_info_map.items() if fc1 == c1]
+            if not show_empty_dirs and not c1_files:
+                continue
+            with st.expander(f"🗂️ {c1} ({len(c1_files)})", expanded=False):
+                for c2, c3_list in c2_dict.items():
+                    c2_files = [f for f, (fc1, fc2, _, _) in file_info_map.items() if fc1 == c1 and fc2 == c2]
+                    if not show_empty_dirs and not c2_files:
+                        continue
+                    with st.expander(f"📂 {c2} ({len(c2_files)})", expanded=False):
+                        # 第二層直接上傳按鈕
+                        col_d2_title, col_d2_btn = st.columns([4, 1])
+                        with col_d2_title:
                             no_c3_files = sorted([f for f, (fc1, fc2, fc3, _) in file_info_map.items() if fc1 == c1 and fc2 == c2 and not fc3])
-                            if no_c3_files:
-                                st.markdown(f"**🏷️ (直接放第二層)** `({len(no_c3_files)})`")
-                                for f in no_c3_files:
-                                    if st.button(f"📄 {f}", key=f"dir_{c1}_{c2}_none_{f}", use_container_width=True):
-                                        st.session_state.jump_to_file = f
-                            for c3 in c3_list:
-                                c3_files = sorted([f for f, (fc1, fc2, fc3, _) in file_info_map.items() if fc1 == c1 and fc2 == c2 and fc3 == c3])
-                                if not c3_files:
-                                    continue
+                            st.markdown(f"**🏷️ (直接放第二層)** `({len(no_c3_files)})`")
+                        with col_d2_btn:
+                            if st.button("📥", key=f"qup_{c1}_{c2}_none", help=f"直接上傳檔案至：{c1} > {c2}"):
+                                st.session_state.quick_upload_target = (c1, c2, "")
+                                st.rerun()
+                        for f in no_c3_files:
+                            if st.button(f"📄 {f}", key=f"dir_{c1}_{c2}_none_{f}", use_container_width=True):
+                                st.session_state.jump_to_file = f
+
+                        # 第三層細夾列表與專屬 📥 按鈕
+                        for c3 in c3_list:
+                            c3_files = sorted([f for f, (fc1, fc2, fc3, _) in file_info_map.items() if fc1 == c1 and fc2 == c2 and fc3 == c3])
+                            if not show_empty_dirs and not c3_files:
+                                continue
+                            col_d3_title, col_d3_btn = st.columns([4, 1])
+                            with col_d3_title:
                                 st.markdown(f"**🏷️ {c3}** `({len(c3_files)})`")
-                                for f in c3_files:
-                                    if st.button(f"📄 {f}", key=f"dir_{c1}_{c2}_{c3}_{f}", use_container_width=True):
-                                        st.session_state.jump_to_file = f
+                            with col_d3_btn:
+                                if st.button("📥", key=f"qup_{c1}_{c2}_{c3}", help=f"直接上傳檔案至：{c1} > {c2} > {c3}"):
+                                    st.session_state.quick_upload_target = (c1, c2, c3)
+                                    st.rerun()
+                            for f in c3_files:
+                                if st.button(f"📄 {f}", key=f"dir_{c1}_{c2}_{c3}_{f}", use_container_width=True):
+                                    st.session_state.jump_to_file = f
+
+    with st.expander("☁️ 專案雲端資料夾捷徑", expanded=False):
+        st.markdown("[📁 每日施工照片雲端夾](https://drive.google.com/drive/folders/1MFrIjPZB3cBWBb2Nt_q2eaTRDw7zzno9?usp=drive_link)")
+        st.markdown("[📁 每日日報更新雲端夾](https://drive.google.com/drive/folders/1vmmaXftLfCTT3fd5_x_sIl6jc9KrEATX?usp=drive_link)")
 
     with st.expander("⚙️ 資料夾設定", expanded=False):
         t1, t2, t3, t4 = st.tabs(["第1層", "第2層", "第3層", "防呆/快捷"])
@@ -692,15 +857,17 @@ with st.sidebar:
                     else:
                         st.warning("最高管理員「聖引」不可刪除！")
 
-    with st.expander("💾 備份與還原", expanded=False):
+    with st.expander("💾 手動備份與還原", expanded=False):
         if os.path.exists(DB_FILE):
             with open(DB_FILE, "rb") as f:
                 st.download_button("📥 下載備份 (.pkl)", data=f, file_name="engineering_knowledge_db.pkl", use_container_width=True)
-        restore_file = st.file_uploader("📤 上傳備份檔還原：", type=["pkl"])
-        if restore_file and st.button("⚡ 立即還原知識庫", use_container_width=True):
+        restore_file = st.file_uploader("📤 上傳舊有備份檔還原：", type=["pkl"])
+        if restore_file and st.button("⚡ 立即還原並同步至 GitHub", use_container_width=True):
             with open(DB_FILE, "wb") as f:
                 f.write(restore_file.getvalue())
-            st.success("已還原！")
+            db = load_db()
+            save_db(db)
+            st.success("已還原並同步！")
             st.rerun()
 
     enable_web_search = st.checkbox("🌐 Google 聯網搜尋", value=False)
@@ -759,13 +926,15 @@ if st.session_state.jump_to_file and st.session_state.jump_to_file in file_info_
                         if c["file_name"] == j_file:
                             c["file_name"] = clean_qn
                             c["cat1"], c["cat2"], c["cat3"] = q_c1, q_c2, q_c3
-                    save_db(db)
+                    with st.spinner("💾 正在儲存並同步至 GitHub..."):
+                        save_db(db)
                     st.session_state.jump_to_file = clean_qn
                     st.rerun()
             with qb2:
                 if st.button("🗑️ 刪除此檔案", key="q_del", use_container_width=True):
                     db["chunks"] = [c for c in chunks if c["file_name"] != j_file]
-                    save_db(db)
+                    with st.spinner("🗑️ 正在刪除並同步至 GitHub..."):
+                        save_db(db)
                     st.session_state.jump_to_file = None
                     st.rerun()
 
@@ -773,7 +942,7 @@ if st.session_state.jump_to_file and st.session_state.jump_to_file in file_info_
             with st.expander(f"📄 {fc['location']}", expanded=True):
                 st.text(fc["content"])
 
-# ================= 核心四大分頁 =================
+# ================= 核心五大分頁 =================
 tab_ai, tab_memo, tab_search, tab_batch, tab_read = st.tabs([
     "💬 AI 問答",
     "📝 公文生成",
@@ -824,37 +993,38 @@ with tab_ai:
             with tc5:
                 st.write("")
                 if st.button("💾 存入永久目錄", type="primary", use_container_width=True):
-                    saved_names = []
-                    if pasted_context and pasted_context.strip():
-                        fn_clean = pasted_fname.strip() or "臨時貼上資料.txt"
-                        if not fn_clean.endswith(".txt"):
-                            fn_clean += ".txt"
-                        db["chunks"] = [c for c in db["chunks"] if c["file_name"] != fn_clean]
-                        txt_val = pasted_context.strip()
-                        for i in range(0, len(txt_val), 900):
-                            db["chunks"].append({
-                                "file_name": fn_clean, "cat1": save_t_c1, "cat2": save_t_c2, "cat3": save_t_c3,
-                                "location": f"(段落 {i//900 + 1})", "content": txt_val[i:i+900], "uploader": current_user
-                            })
-                        saved_names.append(fn_clean)
-                    if temp_files:
-                        for tf in temp_files:
-                            db["chunks"] = [c for c in db["chunks"] if c["file_name"] != tf.name]
-                            new_c, _ = extract_text_from_file(tf, save_t_c1, save_t_c2, save_t_c3, current_user, enable_ocr=True)
-                            db["chunks"].extend(new_c)
-                            saved_names.append(tf.name)
-                    save_db(db)
-                    st.session_state.upload_notice = {
-                        "count": len(saved_names),
-                        "files": saved_names,
-                        "path": f"{save_t_c1} > {save_t_c2}" + (f" > {save_t_c3}" if save_t_c3 else ""),
-                        "ocr_pages": 0
-                    }
-                    st.rerun()
+                    with st.spinner("💾 正在存入資料庫並同步備份至 GitHub..."):
+                        saved_details = []
+                        path_lbl = f"{save_t_c1} > {save_t_c2}" + (f" > {save_t_c3}" if save_t_c3 else "")
+                        if pasted_context and pasted_context.strip():
+                            fn_clean = pasted_fname.strip() or "臨時貼上資料.txt"
+                            if not fn_clean.endswith(".txt"):
+                                fn_clean += ".txt"
+                            db["chunks"] = [c for c in db["chunks"] if c["file_name"] != fn_clean]
+                            txt_val = pasted_context.strip()
+                            for i in range(0, len(txt_val), 900):
+                                db["chunks"].append({
+                                    "file_name": fn_clean, "cat1": save_t_c1, "cat2": save_t_c2, "cat3": save_t_c3,
+                                    "location": f"(段落 {i//900 + 1})", "content": txt_val[i:i+900], "uploader": current_user
+                                })
+                            saved_details.append(f"`{fn_clean}` ➔ 📂 **{path_lbl}**")
+                        if temp_files:
+                            for tf in temp_files:
+                                db["chunks"] = [c for c in db["chunks"] if c["file_name"] != tf.name]
+                                new_c, _ = extract_text_from_file(tf, save_t_c1, save_t_c2, save_t_c3, current_user, enable_ocr=True)
+                                db["chunks"].extend(new_c)
+                                saved_details.append(f"`{tf.name}` ➔ 📂 **{path_lbl}**")
+                        save_db(db)
+                        st.session_state.upload_notice = {
+                            "count": len(saved_details),
+                            "files": saved_details,
+                            "ocr_pages": 0
+                        }
+                        st.rerun()
 
     if "messages" not in st.session_state:
         st.session_state.messages = [
-            {"role": "assistant", "content": f"**{current_user}** 您好！您可以在下方輸入框**直接打字、按 `Ctrl+V` 直接貼上螢幕截圖**，或展開上方**貼上大段文字/檔案**讓我幫您與資料庫交叉比對！"}
+            {"role": "assistant", "content": f"**{current_user}** 您好！您可以在下方輸入框**直接打字、按 `Ctrl+V` 直接貼上螢幕截圖**，或直接把檔案拉進左側最上方的「⚡ 智慧極速上傳」讓 AI 自動幫您歸檔！"}
         ]
 
     for msg in st.session_state.messages:
@@ -1012,13 +1182,11 @@ with tab_memo:
             st.warning("請先輸入擬稿需求！")
         else:
             with st.spinner("🤖 AI 正在深度參考您的歷史公文風格、慣用語法、受文對象與內部資料庫契約規範進行擬稿中..."):
-                # 抓取資料庫中的歷史公文作為風格參考
                 memo_history_chunks = [
                     c for c in db["chunks"] 
                     if "公文" in c.get("cat1", "") or "公文" in c.get("cat2", "") or "往來" in c.get("cat2", "")
                 ]
                 history_text = "\n".join([f"【參考範本：{c['file_name']}】\n{c['content']}" for c in memo_history_chunks[:10]])
-                
                 contract_context = search_internal_db(memo_topic, db["chunks"], selected_cat1s, selected_cat2s, selected_cat3s)
 
                 memo_prompt = f"""
@@ -1055,7 +1223,6 @@ with tab_memo:
         st.markdown("### 📄 產出之標準排版公文預覽：")
         st.markdown(st.session_state.last_generated_memo)
 
-        # 動態生成 Word 檔供下載
         doc_gen = docx.Document()
         doc_gen.add_heading(f"工程公文草稿 — {current_user} 擬", level=1)
         for line in st.session_state.last_generated_memo.split("\n"):
@@ -1108,7 +1275,6 @@ with tab_search:
         matched_results.sort(key=lambda x: x[0], reverse=True)
         st.success(f"🎯 共找到符合條件的段落總計 **{len(matched_results)}** 處！以下為檔案清單總覽：")
 
-        # 依檔案分組彙整
         file_grouped_hits = {}
         for hits, item in matched_results:
             fname = item["file_name"]
@@ -1190,7 +1356,8 @@ with tab_batch:
                         for c in chunks:
                             if c["file_name"] == old_n:
                                 c["file_name"] = new_n
-                save_db(db)
+                with st.spinner("💾 正在儲存並同步至 GitHub..."):
+                    save_db(db)
                 st.success("✅ 檔案名稱已批次更新！")
                 st.rerun()
 
@@ -1213,7 +1380,8 @@ with tab_batch:
                 for c in chunks:
                     if c["file_name"] in sel_names:
                         c["cat1"], c["cat2"], c["cat3"] = dest_c1, dest_c2, dest_c3
-                save_db(db)
+                with st.spinner("📦 正在搬移並同步至 GitHub..."):
+                    save_db(db)
                 dest_path_str = f"{dest_c1} > {dest_c2}" + (f" > {dest_c3}" if dest_c3 else "")
                 st.success(f"✅ 已將 {len(sel_names)} 份檔案成功搬移至【{dest_path_str}】！")
                 st.rerun()
@@ -1222,7 +1390,8 @@ with tab_batch:
             if st.button(f"🗑️ 批次刪除 ({len(selected_rows)} 份)", use_container_width=True, disabled=(len(selected_rows) == 0)):
                 sel_names = {r["_orig_name"] for r in selected_rows}
                 db["chunks"] = [c for c in chunks if c["file_name"] not in sel_names]
-                save_db(db)
+                with st.spinner("🗑️ 正在刪除並同步至 GitHub..."):
+                    save_db(db)
                 st.success(f"🗑️ 已批次刪除 {len(sel_names)} 份檔案！")
                 st.rerun()
 
