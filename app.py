@@ -4,8 +4,10 @@ import re
 import hashlib
 import pickle
 import base64
+import urllib.parse
 import requests
 import streamlit as st
+import streamlit.components.v1 as components
 from google import genai
 from google.genai import types
 import pypdf
@@ -78,6 +80,13 @@ DEFAULT_SHORTCUTS = [
     "📋 歷次會議決議追蹤",
     "⚠️ 職安衛查驗標準"
 ]
+
+DEFAULT_CLOUD_LINKS = [
+    {"title": "📁 每日施工照片雲端夾", "url": "https://drive.google.com/drive/folders/1MFrIjPZB3cBWBb2Nt_q2eaTRDw7zzno9?usp=drive_link"},
+    {"title": "📁 每日日報更新雲端夾", "url": "https://drive.google.com/drive/folders/1vmmaXftLfCTT3fd5_x_sIl6jc9KrEATX?usp=drive_link"}
+]
+
+DEFAULT_FIGMA_BOARDS = []
 
 ENGINEERING_SYNONYMS = {
     "浮實": ["浮時", "總浮時", "自由浮時", "浮動", "Total Float", "TF"],
@@ -177,6 +186,8 @@ def load_db():
                     "chunks": chunks,
                     "users": data.get("users", DEFAULT_USERS.copy()),
                     "shortcuts": data.get("shortcuts", DEFAULT_SHORTCUTS.copy()),
+                    "cloud_links": data.get("cloud_links", [dict(x) for x in DEFAULT_CLOUD_LINKS]),
+                    "figma_boards": data.get("figma_boards", [dict(x) for x in DEFAULT_FIGMA_BOARDS]),
                     "max_mb": data.get("max_mb", 80)
                 }
         except Exception:
@@ -186,6 +197,8 @@ def load_db():
         "chunks": [],
         "users": DEFAULT_USERS.copy(),
         "shortcuts": DEFAULT_SHORTCUTS.copy(),
+        "cloud_links": [dict(x) for x in DEFAULT_CLOUD_LINKS],
+        "figma_boards": [dict(x) for x in DEFAULT_FIGMA_BOARDS],
         "max_mb": 80
     }
 
@@ -195,6 +208,17 @@ def save_db(db_dict):
     if GITHUB_TOKEN and GITHUB_REPO:
         with open(DB_FILE, "rb") as f:
             push_db_to_github(f.read())
+
+def to_figma_embed_url(raw_url):
+    u = raw_url.strip()
+    if "iframe" in u and "src=" in u:
+        m = re.search(r'src=["\']([^"\']+)["\']', u)
+        if m:
+            return m.group(1)
+    if "figma.com/embed" in u:
+        return u
+    encoded = urllib.parse.quote(u, safe="")
+    return f"https://www.figma.com/embed?embed_host=share&url={encoded}"
 
 db = load_db()
 users_db = db["users"]
@@ -650,7 +674,7 @@ for c in chunks:
 
 db_size_mb = os.path.getsize(DB_FILE) / (1024 * 1024) if os.path.exists(DB_FILE) else 0.0
 
-# ================= 左側導覽：極速上傳 ＋ 展開即可就地編輯目錄 =================
+# ================= 左側導覽：極速上傳 ＋ 展開就地編輯目錄 ＋ 動態捷徑 =================
 with st.sidebar:
     col_u1, col_u2 = st.columns([3, 2])
     with col_u1:
@@ -709,7 +733,7 @@ with st.sidebar:
                     if process_and_save_uploads(uploaded_files, mode="manual", target_c1=up_c1, target_c2=up_c2, target_c3=up_c3, enable_ocr=enable_ocr_upload):
                         st.rerun()
 
-    # ★ 升級亮點：展開目錄即可「直接原地改名、新增子夾、刪除」＋ 點 📥 直接傳
+    # ★ 展開目錄即可「直接原地改名、新增子夾、刪除」＋ 點 📥 直接傳
     with st.expander("📁 目錄 (展開可直接改名 / 點 📥 快傳)", expanded=True):
         st.caption("💡 展開資料夾可**直接改名或新增子夾**；點 `📥` 直接傳檔：")
         
@@ -730,7 +754,6 @@ with st.sidebar:
             if not show_empty_dirs and not c1_files:
                 continue
             with st.expander(f"🗂️ {c1} ({len(c1_files)})", expanded=False):
-                # ★ 第一層展開後：直接原地編輯按鈕 (Popover)
                 with st.popover(f"✏️ 管理「{c1}」(改名 / 新增次夾 / 刪除)", use_container_width=True):
                     ren_c1_val = st.text_input("✏️ 修改第1層主夾名稱：", value=c1, key=f"in_ren_c1_{c1}")
                     if st.button("💾 儲存主夾名稱", key=f"btn_ren_c1_{c1}", type="primary", use_container_width=True):
@@ -768,7 +791,6 @@ with st.sidebar:
                     if not show_empty_dirs and not c2_files:
                         continue
                     with st.expander(f"📂 {c2} ({len(c2_files)})", expanded=False):
-                        # ★ 第二層展開後：直接原地編輯按鈕 (Popover)
                         with st.popover(f"✏️ 管理「{c2}」(改名 / 新增細夾 / 刪除)", use_container_width=True):
                             ren_c2_val = st.text_input("✏️ 修改第2層次夾名稱：", value=c2, key=f"in_ren_c2_{c1}_{c2}")
                             if st.button("💾 儲存次夾名稱", key=f"btn_ren_c2_{c1}_{c2}", type="primary", use_container_width=True):
@@ -800,7 +822,6 @@ with st.sidebar:
                                 else:
                                     st.warning("至少需保留一個次夾！")
 
-                        # 第二層直接上傳按鈕
                         col_d2_title, col_d2_btn = st.columns([4, 1])
                         with col_d2_title:
                             no_c3_files = sorted([f for f, (fc1, fc2, fc3, _) in file_info_map.items() if fc1 == c1 and fc2 == c2 and not fc3])
@@ -813,7 +834,6 @@ with st.sidebar:
                             if st.button(f"📄 {f}", key=f"dir_{c1}_{c2}_none_{f}", use_container_width=True):
                                 st.session_state.jump_to_file = f
 
-                        # 第三層細夾列表：右側同時提供 ✏️(改名) 與 📥(快傳)
                         for c3 in list(c3_list):
                             c3_files = sorted([f for f, (fc1, fc2, fc3, _) in file_info_map.items() if fc1 == c1 and fc2 == c2 and fc3 == c3])
                             if not show_empty_dirs and not c3_files:
@@ -833,9 +853,30 @@ with st.sidebar:
                                 if st.button(f"📄 {f}", key=f"dir_{c1}_{c2}_{c3}_{f}", use_container_width=True):
                                     st.session_state.jump_to_file = f
 
-    with st.expander("☁️ 專案雲端資料夾捷徑", expanded=False):
-        st.markdown("[📁 每日施工照片雲端夾](https://drive.google.com/drive/folders/1MFrIjPZB3cBWBb2Nt_q2eaTRDw7zzno9?usp=drive_link)")
-        st.markdown("[📁 每日日報更新雲端夾](https://drive.google.com/drive/folders/1vmmaXftLfCTT3fd5_x_sIl6jc9KrEATX?usp=drive_link)")
+    # ★ 升級：可在網頁上自由新增/管理的雲端與外部捷徑
+    with st.expander("☁️ 專案雲端與 Figma 捷徑", expanded=True):
+        cloud_links = db.get("cloud_links", DEFAULT_CLOUD_LINKS)
+        for lk in cloud_links:
+            st.markdown(f"[{lk['title']}]({lk['url']})")
+        for fb in db.get("figma_boards", []):
+            st.markdown(f"[🎨 {fb['title']} (開新視窗)]({fb['url']})")
+
+        with st.popover("✏️ 管理捷徑連結", use_container_width=True):
+            st.markdown("##### ➕ 新增外部捷徑連結")
+            nl_title = st.text_input("連結顯示名稱：", placeholder="如：📁 變更設計雲端夾", key="nl_t")
+            nl_url = st.text_input("網址 (URL)：", placeholder="https://...", key="nl_u")
+            if st.button("➕ 新增捷徑", type="primary", use_container_width=True):
+                if nl_title.strip() and nl_url.strip():
+                    db.setdefault("cloud_links", []).append({"title": nl_title.strip(), "url": nl_url.strip()})
+                    save_db(db)
+                    st.rerun()
+            if cloud_links:
+                st.divider()
+                del_lk_idx = st.selectbox("選擇要移除的捷徑：", range(len(cloud_links)), format_func=lambda i: cloud_links[i]["title"], key="del_lk")
+                if st.button("🗑️ 移除選中捷徑", use_container_width=True):
+                    db["cloud_links"].pop(del_lk_idx)
+                    save_db(db)
+                    st.rerun()
 
     with st.expander("⚙️ 防呆上限與首頁快捷設定", expanded=False):
         new_max_mb = st.slider("單檔防呆上限 (MB)：", 20, 200, int(max_mb_limit), 10)
@@ -969,9 +1010,10 @@ if st.session_state.jump_to_file and st.session_state.jump_to_file in file_info_
             with st.expander(f"📄 {fc['location']}", expanded=True):
                 st.text(fc["content"])
 
-# ================= 核心五大分頁 =================
-tab_ai, tab_memo, tab_search, tab_batch, tab_read = st.tabs([
+# ================= 核心六大分頁 =================
+tab_ai, tab_figma, tab_memo, tab_search, tab_batch, tab_read = st.tabs([
     "💬 AI 問答",
+    "🎨 流程圖 (Figma)",
     "📝 公文生成",
     "🔎 搜檔案",
     "📦 批次搬移與整理",
@@ -1190,6 +1232,60 @@ with tab_ai:
                 st.markdown(answer)
                 st.session_state.messages.append({"role": "assistant", "content": answer})
                 st.rerun()
+
+# ================= 🎨 流程圖 (Figma 互動內嵌與管理) 專屬分頁 =================
+with tab_figma:
+    f_head1, f_head2 = st.columns([4, 1.5])
+    with f_head1:
+        st.markdown("### 🎨 專案工程流程圖與架構看板 (Figma 互動內嵌)")
+    with f_head2:
+        with st.popover("➕ 新增 / 管理 Figma 流程圖", use_container_width=True):
+            st.markdown("##### 📌 新增 Figma 流程圖")
+            st.caption("💡 請確認 Figma 右上角 **Share** 權限已設為 `Anyone with the link can view`，直接貼上網址即可自動內嵌！")
+            fg_title = st.text_input("流程圖名稱：", placeholder="如：施工查驗與送審流程圖")
+            fg_url = st.text_input("Figma 分享連結 (URL)：", placeholder="https://www.figma.com/...")
+            if st.button("💾 儲存並內嵌此流程圖", type="primary", use_container_width=True):
+                if fg_title.strip() and fg_url.strip():
+                    db.setdefault("figma_boards", []).append({
+                        "title": fg_title.strip(),
+                        "url": fg_url.strip()
+                    })
+                    with st.spinner("💾 正在儲存並同步至 GitHub..."):
+                        save_db(db)
+                    st.rerun()
+                else:
+                    st.warning("請填寫名稱與網址！")
+
+            figma_list = db.get("figma_boards", [])
+            if figma_list:
+                st.divider()
+                st.markdown("##### 🗑️ 移除現有流程圖")
+                del_fg_idx = st.selectbox("選擇要移除的項目：", range(len(figma_list)), format_func=lambda i: figma_list[i]["title"])
+                if st.button("🗑️ 刪除此流程圖", use_container_width=True):
+                    db["figma_boards"].pop(del_fg_idx)
+                    save_db(db)
+                    st.rerun()
+
+    figma_boards = db.get("figma_boards", [])
+    if not figma_boards:
+        st.info("👆 目前尚未加入 Figma 流程圖！請點擊右上角的 **「➕ 新增 / 管理 Figma 流程圖」**，將您的 Figma 網址貼上，即可在此直接縮放、拖曳瀏覽互動式流程圖！")
+    else:
+        ctrl1, ctrl2, ctrl3 = st.columns([2.5, 1.5, 1.5])
+        with ctrl1:
+            sel_fg_idx = st.selectbox(
+                "📂 選擇要檢視的流程圖看板：",
+                range(len(figma_boards)),
+                format_func=lambda i: f"🎨 {figma_boards[i]['title']}"
+            )
+        selected_board = figma_boards[sel_fg_idx]
+        with ctrl2:
+            canvas_height = st.slider("📐 畫布顯示高度 (px)：", 500, 1200, 750, 50)
+        with ctrl3:
+            st.write("")
+            st.link_button("🚀 在 Figma 新分頁開啟編輯", selected_board["url"], use_container_width=True)
+
+        embed_src = to_figma_embed_url(selected_board["url"])
+        components.iframe(embed_src, height=canvas_height, scrolling=True)
 
 # ================= 📝 公文生成專屬分頁 =================
 with tab_memo:
@@ -1430,8 +1526,8 @@ with tab_read:
         default_idx = sorted_files.index(st.session_state.jump_to_file) if st.session_state.jump_to_file in sorted_files else 0
         view_file = st.selectbox("選擇要閱讀的檔案：", sorted_files, index=default_idx)
         vc1, vc2, vc3, vup = file_info_map[view_file]
-        path_read_str = f"{vc1} > {vc2}" + (f" > {vc3}" if vc3 else " (直接放第二層)")
-        st.caption(f"📂 三層路徑：**{path_read_str}** ｜ 👤 上傳者：**{vup}**")
+        path_read_str = f"{vc1} > {vc2}" + (f" > {fc['cat3']}" if vc3 else " (直接放第二層)")
+        st.caption(f"📂 三層路徑：**{vc1} > {vc2}{' > ' + vc3 if vc3 else ''}** ｜ 👤 上傳者：**{vup}**")
         for fc in [c for c in chunks if c["file_name"] == view_file]:
             with st.expander(f"📄 {fc['file_name']} — {fc['location']}", expanded=True):
                 st.text(fc["content"])
