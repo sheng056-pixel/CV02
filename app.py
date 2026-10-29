@@ -304,7 +304,7 @@ if not st.session_state.current_user:
 raw_current_user = st.session_state.current_user
 current_user = users_db.get(raw_current_user, {}).get("display_name", raw_current_user)
 
-# ================= 檔案解析與匯入核心函數 =================
+# ================= 檔案解析與匯入核心函數 (含 CAD 複雜向量圖防爆保護) =================
 def ocr_with_gemini(file_bytes, mime_type):
     if not GEMINI_API_KEY:
         return ""
@@ -349,7 +349,12 @@ def extract_text_from_file(uploaded_file, cat1, cat2, cat3, uploader, enable_ocr
         reader = pypdf.PdfReader(io.BytesIO(raw_bytes))
         scan_pages = []
         for i, page in enumerate(reader.pages):
-            page_text = (page.extract_text() or "").strip()
+            try:
+                page_text = (page.extract_text() or "").strip()
+            except Exception:
+                # ★ 防爆保護：當遇到 CAD 轉出之超高密度向量圖說導致 LimitReachedError 時，自動轉交 AI 視覺辨識！
+                page_text = ""
+
             if len(page_text) >= 25:
                 text_chunks.append({
                     "file_name": filename, "cat1": cat1, "cat2": cat2, "cat3": cat3,
@@ -361,19 +366,22 @@ def extract_text_from_file(uploaded_file, cat1, cat2, cat3, uploader, enable_ocr
         ocr_count = 0
         if scan_pages and enable_ocr:
             max_ocr_pages = min(len(scan_pages), 25)
-            prog = st.progress(0, text=f"🔍 偵測到《{filename}》含掃描頁，正在啟動 AI 光學辨識 (共 {max_ocr_pages} 頁)...")
+            prog = st.progress(0, text=f"🔍 偵測到《{filename}》含掃描頁或複雜工程圖說，正在啟動 AI 視覺辨識 (共 {max_ocr_pages} 頁)...")
             for idx, page_num in enumerate(scan_pages[:max_ocr_pages]):
-                writer = pypdf.PdfWriter()
-                writer.add_page(reader.pages[page_num])
-                buf = io.BytesIO()
-                writer.write(buf)
-                ocr_res = ocr_with_gemini(buf.getvalue(), "application/pdf")
-                if ocr_res:
-                    text_chunks.append({
-                        "file_name": filename, "cat1": cat1, "cat2": cat2, "cat3": cat3,
-                        "location": f"(第 {page_num+1} 頁-OCR掃描辨識)", "content": ocr_res, "uploader": uploader
-                    })
-                    ocr_count += 1
+                try:
+                    writer = pypdf.PdfWriter()
+                    writer.add_page(reader.pages[page_num])
+                    buf = io.BytesIO()
+                    writer.write(buf)
+                    ocr_res = ocr_with_gemini(buf.getvalue(), "application/pdf")
+                    if ocr_res:
+                        text_chunks.append({
+                            "file_name": filename, "cat1": cat1, "cat2": cat2, "cat3": cat3,
+                            "location": f"(第 {page_num+1} 頁-AI圖說/掃描辨識)", "content": ocr_res, "uploader": uploader
+                        })
+                        ocr_count += 1
+                except Exception:
+                    pass
                 prog.progress((idx + 1) / max_ocr_pages, text=f"🔍 正在辨識《{filename}》第 {page_num+1} 頁 ({idx+1}/{max_ocr_pages})...")
             prog.empty()
         return text_chunks, ocr_count
@@ -508,7 +516,7 @@ def process_and_save_uploads(uploaded_files, mode="manual", target_c1="", target
 def show_upload_success_dialog(info):
     st.success(f"✅ 已成功將 **{info['count']}** 份檔案寫入資料庫並自動同步至 GitHub！")
     if info.get("ocr_pages", 0) > 0:
-        st.info(f"👁️ 內含 **{info['ocr_pages']}** 頁掃描影像，已透過 AI 視覺辨識轉為可搜尋文字！")
+        st.info(f"👁️ 內含 **{info['ocr_pages']}** 頁掃描影像或複雜圖說，已透過 AI 視覺辨識轉為可搜尋文字！")
     st.markdown("**📄 本次歸檔清單與路徑（若想換位置可於目錄點擊改名/搬移）：**")
     for item_str in info.get("files", []):
         st.markdown(f"- {item_str}")
@@ -522,7 +530,7 @@ def show_quick_folder_upload_dialog(target_info):
     path_str = f"{tc1} > {tc2}" + (f" > {tc3}" if tc3 else " (直接放第二層)")
     st.markdown(f"📂 **目標鎖定路徑：** `{path_str}`")
     st.caption("💡 直接將電腦中的檔案拖拉進下方框內，**手放開就會立刻自動開始匯入**，免按確認鈕！")
-    q_ocr = st.checkbox("👁️ 掃描檔自動 AI 光學辨識 (OCR)", value=True, key="q_dlg_ocr")
+    q_ocr = st.checkbox("👁️ 掃描檔與複雜圖說自動 AI 辨識 (OCR)", value=True, key="q_dlg_ocr")
     q_files = st.file_uploader(
         "請拖曳或選擇檔案：",
         type=["pdf", "docx", "pptx", "xlsx", "txt", "jpg", "jpeg", "png"],
@@ -690,7 +698,7 @@ with st.sidebar:
     # ★ 黃金組合 1：AI 智慧極速拖曳區
     with st.expander("⚡ 智慧極速上傳 (AI 自動歸檔)", expanded=True):
         st.caption("💡 直接將多份檔案拖進下方框內，**手放開即自動依檔名分類並存入 GitHub**，免選資料夾、免按確認！")
-        smart_ocr = st.checkbox("👁️ 掃描檔自動 AI 辨識 (OCR)", value=True, key="smart_ocr_chk")
+        smart_ocr = st.checkbox("👁️ 掃描檔與圖說自動 AI 辨識 (OCR)", value=True, key="smart_ocr_chk")
         smart_files = st.file_uploader(
             f"拖拉檔案至此 (單檔上限 {max_mb_limit}MB)",
             type=["pdf", "docx", "pptx", "xlsx", "txt", "jpg", "jpeg", "png"],
@@ -853,7 +861,7 @@ with st.sidebar:
                                 if st.button(f"📄 {f}", key=f"dir_{c1}_{c2}_{c3}_{f}", use_container_width=True):
                                     st.session_state.jump_to_file = f
 
-    # ★ 升級：可在網頁上自由新增/管理的雲端與外部捷徑
+    # ★ 升級：免填名稱也能自動命名的雲端與 Figma 捷徑管理
     with st.expander("☁️ 專案雲端與 Figma 捷徑", expanded=True):
         cloud_links = db.get("cloud_links", DEFAULT_CLOUD_LINKS)
         for lk in cloud_links:
@@ -863,11 +871,17 @@ with st.sidebar:
 
         with st.popover("✏️ 管理捷徑連結", use_container_width=True):
             st.markdown("##### ➕ 新增外部捷徑連結")
-            nl_title = st.text_input("連結顯示名稱：", placeholder="如：📁 變更設計雲端夾", key="nl_t")
+            nl_title = st.text_input("連結顯示名稱 (可留空自動命名)：", placeholder="如：📁 變更設計雲端夾", key="nl_t")
             nl_url = st.text_input("網址 (URL)：", placeholder="https://...", key="nl_u")
             if st.button("➕ 新增捷徑", type="primary", use_container_width=True):
-                if nl_title.strip() and nl_url.strip():
-                    db.setdefault("cloud_links", []).append({"title": nl_title.strip(), "url": nl_url.strip()})
+                if not nl_url.strip():
+                    st.warning("⚠️ 請貼上網址 (URL)！")
+                else:
+                    clean_url = nl_url.strip()
+                    clean_title = nl_title.strip() or ("🎨 Figma 流程圖" if "figma.com" in clean_url.lower() else "🔗 外部雲端捷徑")
+                    db.setdefault("cloud_links", []).append({"title": clean_title, "url": clean_url})
+                    if "figma.com" in clean_url.lower():
+                        db.setdefault("figma_boards", []).append({"title": clean_title, "url": clean_url})
                     save_db(db)
                     st.rerun()
             if cloud_links:
@@ -1138,7 +1152,7 @@ with tab_ai:
             st.markdown(display_q)
 
         with st.chat_message("assistant"):
-            with st.spinner("🔍 正在透過 AI 智慧動態同義詞擴展，深度檢索詳細價目表與規範中..."):
+            with st.spinner("🔍 正在深度檢索工程資料庫中..."):
                 internal_context = search_internal_db(user_query, db["chunks"], selected_cat1s, selected_cat2s, selected_cat3s)
                 file_summary = [
                     f"[{c1}>{c2}{'>' + c3 if c3 else ''}] {fname}"
@@ -1172,19 +1186,20 @@ with tab_ai:
                         joined_t = "\n".join([f"{c['location']} {c['content']}" for c in t_chunks])
                         temp_text_context += f"\n=== 隨附臨時檔案：{tf.name} ===\n{joined_t[:15000]}\n"
 
+                # ★ 升級：嚴格禁止開頭問候、禁止重複問題、禁止結尾客套話，並強制將引用來源統一置於回答最下方！
                 system_prompt = f"""
-你是一位專業、嚴謹的「工程專案主任工程師 AI 顧問」。提問組員：{current_user}。
-請根據以下【內部工程資料庫檢索結果】、【使用者貼上/隨附之臨時資料】以及營建與採購法規知識回答。
+你是一位專業、嚴謹的工程專案 AI 顧問。請根據以下【內部工程資料庫檢索結果】與【臨時隨附資料】回答問題。
 
 【目前檢索範圍內的文件清單】：
 {", ".join(file_summary) if file_summary else "尚未匯入文件"}
 
-【回答嚴格守則】：
-1. 明確標註出處：凡引用內部資料，必須標註「【目錄：第1層 > 第2層 [> 第3層]｜來源：檔名與頁碼/投影片頁數/工作表列數】」。
-2. 工程詳細價目表/工項智能對應：面對使用者查詢特定工項（如管子、舊樁拔除、防水等），請務必主動將檢索結果中所有「同義詞、細部規格（如PVC管、既有結構拆除）」納入綜合比對。若價目表或契約中確實有包含該性質之項目，絕對不可直接斷言未編列！
-3. 會議決議時間軸追蹤：若詢問「某議題何時決議/討論過程」，請依會議日期先後順序列出「歷次討論演進時間軸」並標示最終拍板之會議與頁數。
-4. 跨檔案全量日期/天數統計：若詢問「某工項施工日期或累計天數」，請將檢索結果中所有出現該工項之日報/週報日期逐一列出，並計算總天數。
-5. 嚴禁瞎掰：若資料庫與隨附資料皆未載明，請誠實告知「目前內部文件未載明」。
+【回答格式與排版鐵則（請嚴格遵守）】：
+1. 🚫 嚴禁開頭廢話與重複問題：絕對不要輸出「XX你好，我是工程專案主任工程師...」、「針對你提出的問題：『...』，經檢索內部資料庫，答覆如下：」等開場白！第一行請直接給出核心結論或答案！
+2. 🚫 嚴禁結尾客套話：回答結束時，絕對不要輸出「以上說明提供給您作為參考，若後續有其他需求歡迎隨時提出討論」之類的結尾詞。
+3. 📚 參考依據與出處統一置底：在正文敘述中，請保持版面乾淨易讀，不要在句子中間穿插冗長的目錄路徑。請在整篇回答的**最下方**，獨立列出一個「**📚 參考依據與出處：**」區塊，逐一條列本次回答所引用的完整出處（格式：`• 【目錄：第1層 > 第2層 > 第3層｜來源：檔名 (頁碼/列數)】`）。
+4. 工程詳細價目表/工項智能對應：查詢特定工項時，主動納入同義詞與細部規格比對。
+5. 會議決議與施工天數統計：若問決議過程請依日期列出時間軸；若問施工日期請逐一列出日報日期並計算總天數。
+6. 嚴禁瞎掰：若資料庫未載明，請直接告知「目前內部文件未載明」。
 
 {temp_text_context}
 
@@ -1242,19 +1257,20 @@ with tab_figma:
         with st.popover("➕ 新增 / 管理 Figma 流程圖", use_container_width=True):
             st.markdown("##### 📌 新增 Figma 流程圖")
             st.caption("💡 請確認 Figma 右上角 **Share** 權限已設為 `Anyone with the link can view`，直接貼上網址即可自動內嵌！")
-            fg_title = st.text_input("流程圖名稱：", placeholder="如：施工查驗與送審流程圖")
+            fg_title = st.text_input("流程圖名稱 (可留空自動命名)：", placeholder="如：施工查驗與送審流程圖")
             fg_url = st.text_input("Figma 分享連結 (URL)：", placeholder="https://www.figma.com/...")
             if st.button("💾 儲存並內嵌此流程圖", type="primary", use_container_width=True):
-                if fg_title.strip() and fg_url.strip():
+                if fg_url.strip():
+                    clean_fg_title = fg_title.strip() or "🎨 專案工程流程圖"
                     db.setdefault("figma_boards", []).append({
-                        "title": fg_title.strip(),
+                        "title": clean_fg_title,
                         "url": fg_url.strip()
                     })
                     with st.spinner("💾 正在儲存並同步至 GitHub..."):
                         save_db(db)
                     st.rerun()
                 else:
-                    st.warning("請填寫名稱與網址！")
+                    st.warning("請貼上 Figma 網址！")
 
             figma_list = db.get("figma_boards", [])
             if figma_list:
@@ -1526,7 +1542,6 @@ with tab_read:
         default_idx = sorted_files.index(st.session_state.jump_to_file) if st.session_state.jump_to_file in sorted_files else 0
         view_file = st.selectbox("選擇要閱讀的檔案：", sorted_files, index=default_idx)
         vc1, vc2, vc3, vup = file_info_map[view_file]
-        path_read_str = f"{vc1} > {vc2}" + (f" > {fc['cat3']}" if vc3 else " (直接放第二層)")
         st.caption(f"📂 三層路徑：**{vc1} > {vc2}{' > ' + vc3 if vc3 else ''}** ｜ 👤 上傳者：**{vup}**")
         for fc in [c for c in chunks if c["file_name"] == view_file]:
             with st.expander(f"📄 {fc['file_name']} — {fc['location']}", expanded=True):
