@@ -1539,98 +1539,103 @@ with tab_gantt:
     m3.metric("📅 專案預計起訖", f"{min_start} ～ {max_end}")
     m4.metric("⏳ 總日曆天數跨度", f"{total_span_days} 天")
 
-    # 篩選與檢視控制列
-    f_col1, f_col2, f_col3, f_col4 = st.columns([1.8, 1.8, 1.4, 1.5])
+# 篩選與檢視控制列
+    f_col1, f_col2, f_col3, f_col4 = st.columns([1.6, 1.6, 1.6, 1.4])
     with f_col1:
-        filter_cp_only = st.checkbox("🔥 只顯示關鍵要徑 (Critical Path)", value=False)
+        filter_cp_only = st.checkbox("🔥 聚焦關鍵要徑", value=False)
     with f_col2:
         status_opts = ["全部狀態", "進行中", "未開始", "已完成", "進度落後"]
-        filter_status = st.selectbox("🔍 狀態過濾：", status_opts, label_visibility="collapsed")
+        filter_status = st.selectbox("🔍 狀態聚焦：", status_opts, label_visibility="collapsed")
     with f_col3:
-        color_mode = st.radio("🎨 圖表著色依據：", ["依要徑與狀態", "依完成進度(%)"], horizontal=True, label_visibility="collapsed")
+        # ★ 新增：讓你在開會時自由切換「聚光燈凸顯(保留全貌)」或「僅單獨列出」
+        filter_mode = st.radio("檢視方式：", ["💡 聚光燈凸顯 (保留全貌)", "✂️ 僅顯示篩選工項"], horizontal=True, label_visibility="collapsed")
     with f_col4:
-        show_today_line = st.checkbox("📍 顯示今日基準紅線", value=True)
+        show_today_line = st.checkbox("📍 顯示今日紅線", value=True)
 
-    # 過濾顯示用資料
-    filtered_gantt = []
+    # 判斷每個工項是否命中篩選條件
+    has_active_filter = filter_cp_only or (filter_status != "全部狀態")
+    plot_rows = []
     for r in gantt_list:
-        if filter_cp_only and not r.get("是否要徑", False):
+        match_cp = (not filter_cp_only) or bool(r.get("是否要徑", False))
+        match_st = (filter_status == "全部狀態") or (r.get("狀態") == filter_status)
+        is_hit = match_cp and match_st
+
+        if filter_mode == "✂️ 僅顯示篩選工項" and not is_hit:
             continue
-        if filter_status != "全部狀態" and r.get("狀態") != filter_status:
-            continue
-        filtered_gantt.append(r)
+
+        r_copy = dict(r)
+        r_copy["_is_hit"] = is_hit
+        plot_rows.append(r_copy)
 
     # 繪製 Plotly 互動式甘特圖
     fig_html_for_print = ""
-    if filtered_gantt:
-        df_plot = pd.DataFrame(filtered_gantt)
+    if plot_rows:
+        df_plot = pd.DataFrame(plot_rows)
         df_plot["Start"] = pd.to_datetime(df_plot["預計開始日"], errors="coerce")
         df_plot["Finish"] = pd.to_datetime(df_plot["預計完成日"], errors="coerce") + pd.Timedelta(days=1)
         df_plot["Y軸標籤"] = df_plot.apply(
             lambda x: f"{'🔥 ' if x.get('是否要徑') else ''}[{x.get('WBS','')}] {x.get('工項名稱','')} ({x.get('工期(天)',0)}天)",
             axis=1
         )
-        df_plot["類別顯示"] = df_plot.apply(
-            lambda x: "🔥 關鍵要徑 (Critical Path)" if x.get("是否要徑") else f"🟢 一般工項 ({x.get('狀態','未開始')})",
-            axis=1
-        )
+
+        # ★ 聚光燈智慧著色邏輯：未命中項目自動退為淺灰背景，命中項目鮮明凸顯
+        def assign_display_category(row):
+            if has_active_filter and filter_mode == "💡 聚光燈凸顯 (保留全貌)" and not row["_is_hit"]:
+                return "⚪ 非聚焦工項 (背景脈絡)"
+            if row.get("是否要徑"):
+                return "🔥 關鍵要徑 (Critical Path)"
+            return f"🟢 一般工項 ({row.get('狀態','未開始')})"
+
+        df_plot["類別顯示"] = df_plot.apply(assign_display_category, axis=1)
         df_plot["條上文字"] = df_plot.apply(
             lambda x: f"{x.get('工期(天)',0)}天 ({x.get('進度(%)',0)}%)",
             axis=1
         )
 
-        if color_mode == "依要徑與狀態":
-            color_map = {
-                "🔥 關鍵要徑 (Critical Path)": "#D93025",
-                "🟢 一般工項 (已完成)": "#2E7D32",
-                "🟢 一般工項 (進行中)": "#1976D2",
-                "🟢 一般工項 (未開始)": "#546E7A",
-                "🟢 一般工項 (進度落後)": "#F57C00"
-            }
-            fig = px.timeline(
-                df_plot,
-                x_start="Start",
-                x_end="Finish",
-                y="Y軸標籤",
-                color="類別顯示",
-                color_discrete_map=color_map,
-                text="條上文字",
-                hover_name="工項名稱",
-                hover_data={
-                    "Start": False, "Finish": False, "Y軸標籤": False,
-                    "WBS": True, "預計開始日": True, "預計完成日": True,
-                    "工期(天)": True, "進度(%)": True, "狀態": True, "備註": True
-                }
-            )
-        else:
-            fig = px.timeline(
-                df_plot,
-                x_start="Start",
-                x_end="Finish",
-                y="Y軸標籤",
-                color="進度(%)",
-                color_continuous_scale="RdYlGn",
-                range_color=[0, 100],
-                text="條上文字",
-                hover_name="工項名稱",
-                hover_data={
-                    "Start": False, "Finish": False, "Y軸標籤": False,
-                    "WBS": True, "預計開始日": True, "預計完成日": True,
-                    "工期(天)": True, "進度(%)": True, "狀態": True, "備註": True
-                }
-            )
+        color_map = {
+            "🔥 關鍵要徑 (Critical Path)": "#D93025",
+            "🟢 一般工項 (已完成)": "#2E7D32",
+            "🟢 一般工項 (進行中)": "#1976D2",
+            "🟢 一般工項 (未開始)": "#546E7A",
+            "🟢 一般工項 (進度落後)": "#F57C00",
+            "⚪ 非聚焦工項 (背景脈絡)": "#E0E6ED"
+        }
 
-        fig.update_yaxes(categoryorder="array", categoryarray=df_plot["Y軸標籤"].tolist()[::-1], title="")
+        fig = px.timeline(
+            df_plot,
+            x_start="Start",
+            x_end="Finish",
+            y="Y軸標籤",
+            color="類別顯示",
+            color_discrete_map=color_map,
+            text="條上文字",
+            hover_name="工項名稱",
+            hover_data={
+                "Start": False, "Finish": False, "Y軸標籤": False, "_is_hit": False,
+                "WBS": True, "預計開始日": True, "預計完成日": True,
+                "工期(天)": True, "進度(%)": True, "狀態": True, "備註": True
+            }
+        )
+
+        # ★ 強制鎖定 WBS 由上而下的施工順序，不因顏色分組而打亂
+        fig.update_yaxes(
+            categoryorder="array",
+            categoryarray=df_plot["Y軸標籤"].tolist()[::-1],
+            title=""
+        )
         fig.update_xaxes(
             title="工程時程軸 (可框選局部放大、雙擊恢復全貌)",
             tickformat="%Y/%m/%d",
             showgrid=True,
             gridcolor="#E0E0E0"
         )
-        fig.update_traces(textposition="inside", insidetextanchor="middle")
-        chart_h = max(420, len(df_plot) * 42 + 110)
+        fig.update_traces(textposition="inside", insidetextanchor="middle", width=0.6)
+
+        # ★ 動態計算最舒適的高度：就算只剩 1 項，高度也會優雅收斂，不會變成粗磚塊
+        chart_h = max(180, len(df_plot) * 38 + 110)
         fig.update_layout(
             height=chart_h,
+            bargap=0.35,
             margin=dict(l=10, r=20, t=35, b=35),
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1, title=""),
             font=dict(family="Microsoft JhengHei, sans-serif", size=13),
@@ -1648,6 +1653,8 @@ with tab_gantt:
 
         st.plotly_chart(fig, use_container_width=True, config={"displaylogo": False, "toImageButtonOptions": {"format": "png", "filename": "工程甘特圖", "scale": 2}})
         fig_html_for_print = fig.to_html(full_html=False, include_plotlyjs="cdn")
+    else:
+        st.warning("目前篩選條件下無對應工項。")
     else:
         st.warning("目前篩選條件下無對應工項。")
 
