@@ -2,6 +2,9 @@ streamlit
 google-genai
 pypdf
 python-docx
-scikit-learn
 python-pptx
 openpyxl
+scikit-learn
+requests
+pandas
+plotly
