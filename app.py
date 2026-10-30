@@ -43,7 +43,7 @@ GITHUB_TOKEN = st.secrets.get("GITHUB_TOKEN", "").strip()
 GITHUB_REPO = st.secrets.get("GITHUB_REPO", "").strip()
 DB_FILE = "engineering_knowledge_db.pkl"
 
-AVAILABLE_MODELS = ["gemini-3.5-flash-lite", "gemini-3.8-flash", "gemini-3.5-flash"]
+AVAILABLE_MODELS = ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash", "gemini-3.5-flash-lite", "gemini-3.5-flash"]
 
 DEFAULT_FOLDER_TREE_V7 = {
     "01_招標文件與契約": {
@@ -763,7 +763,7 @@ def expand_query_with_synonyms(query):
         try:
             client = genai.Client(api_key=GEMINI_API_KEY)
             res = client.models.generate_content(
-                model="gemini-3.5-flash-lite",
+                model=AVAILABLE_MODELS[0],
                 contents=f"請針對工程合約與詳細價目表中的查詢詞『{query}』，列出 3 至 5 個常見的工程同義詞、細部規格或相關工項名稱（例如查管子可聯想 PVC, PE, 鋼管, 排水管；查拆除可聯想打除, 拔除, 既有結構）。請直接用空白隔開輸出這些詞彙，不要輸出其他多餘文字。",
                 config=types.GenerateContentConfig(temperature=0.1)
             )
@@ -1484,12 +1484,24 @@ with tab_memo:
 2. {format_instruction}
 """
                 client = genai.Client(api_key=GEMINI_API_KEY)
-                memo_res = client.models.generate_content(
-                    model="gemini-3.5-flash",
-                    contents=memo_prompt,
-                    config=types.GenerateContentConfig(temperature=0.2)
-                )
-                generated_memo_text = memo_res.text if memo_res and memo_res.text else "⚠️ 生成失敗，請稍後再試。"
+                generated_memo_text = None
+                last_err = ""
+                for m_name in AVAILABLE_MODELS:
+                    try:
+                        memo_res = client.models.generate_content(
+                            model=m_name,
+                            contents=memo_prompt,
+                            config=types.GenerateContentConfig(temperature=0.2)
+                        )
+                        if memo_res and memo_res.text:
+                            generated_memo_text = memo_res.text
+                            break
+                    except Exception as e:
+                        last_err = str(e)
+                        continue
+
+                if not generated_memo_text:
+                    generated_memo_text = f"⚠️ 公文生成伺服器暫時忙碌，請再按一次生成按鈕試試！({last_err})"
                 st.session_state.last_generated_memo = generated_memo_text
                 st.session_state.last_memo_meta = {
                     "is_internal": is_internal_sign,
