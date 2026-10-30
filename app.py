@@ -1653,8 +1653,7 @@ with tab_gantt:
 
         st.plotly_chart(fig, use_container_width=True, config={"displaylogo": False, "toImageButtonOptions": {"format": "png", "filename": "工程甘特圖", "scale": 2}})
         fig_html_for_print = fig.to_html(full_html=False, include_plotlyjs="cdn")
-    else:
-        st.warning("目前篩選條件下無對應工項。")
+
     else:
         st.warning("目前篩選條件下無對應工項。")
 
