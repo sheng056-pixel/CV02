@@ -1620,7 +1620,7 @@ with tab_gantt:
                 }
             )
 
-        fig.update_yaxes(autorange="reversed", title="")
+        fig.update_yaxes(categoryorder="array", categoryarray=df_plot["Y軸標籤"].tolist()[::-1], title="")
         fig.update_xaxes(
             title="工程時程軸 (可框選局部放大、雙擊恢復全貌)",
             tickformat="%Y/%m/%d",
