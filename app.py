@@ -12,6 +12,11 @@ from google import genai
 from google.genai import types
 import pypdf
 import docx
+from docx.shared import Pt, RGBColor, Cm
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.enum.table import WD_TABLE_ALIGNMENT, WD_ALIGN_VERTICAL
+from docx.oxml import OxmlElement, parse_xml
+from docx.oxml.ns import qn, nsdecls
 from pptx import Presentation
 import openpyxl
 from sklearn.feature_extraction.text import TfidfVectorizer
@@ -209,16 +214,166 @@ def save_db(db_dict):
         with open(DB_FILE, "rb") as f:
             push_db_to_github(f.read())
 
+# ★ 升級版 Figma 內嵌網址轉換器（支援最新 embed.figma.com 標準，大幅提升讀取成功率）
 def to_figma_embed_url(raw_url):
     u = raw_url.strip()
     if "iframe" in u and "src=" in u:
         m = re.search(r'src=["\']([^"\']+)["\']', u)
         if m:
             return m.group(1)
-    if "figma.com/embed" in u:
+    if "embed.figma.com" in u or "figma.com/embed" in u:
         return u
+    if "figma.com/board/" in u or "figma.com/design/" in u or "figma.com/file/" in u or "figma.com/proto/" in u:
+        embed_u = u.replace("https://www.figma.com/", "https://embed.figma.com/").replace("https://figma.com/", "https://embed.figma.com/")
+        sep = "&" if "?" in embed_u else "?"
+        if "embed-host=" not in embed_u:
+            embed_u += f"{sep}embed-host=share"
+        return embed_u
     encoded = urllib.parse.quote(u, safe="")
     return f"https://www.figma.com/embed?embed_host=share&url={encoded}"
+
+# ================= 台電標準「簽辦用紙（內簽）」紅框 Word 生成引擎 =================
+def set_red_table_borders(table):
+    tblPr = table._tbl.tblPr
+    borders = parse_xml(
+        f'<w:tblBorders {nsdecls("w")}>'
+        '<w:top w:val="single" w:sz="6" w:space="0" w:color="FF0000"/>'
+        '<w:left w:val="single" w:sz="6" w:space="0" w:color="FF0000"/>'
+        '<w:bottom w:val="single" w:sz="6" w:space="0" w:color="FF0000"/>'
+        '<w:right w:val="single" w:sz="6" w:space="0" w:color="FF0000"/>'
+        '<w:insideH w:val="single" w:sz="4" w:space="0" w:color="FF0000"/>'
+        '<w:insideV w:val="single" w:sz="6" w:space="0" w:color="FF0000"/>'
+        '</w:tblBorders>'
+    )
+    tblPr.append(borders)
+
+def set_cell_TopBottom_borders(cell, top_sz="4", bottom_sz="4", left_sz="6", right_sz="6"):
+    tcPr = cell._tc.get_or_add_tcPr()
+    borders = parse_xml(
+        f'<w:tcBorders {nsdecls("w")}>'
+        f'<w:top w:val="single" w:sz="{top_sz}" w:space="0" w:color="FF0000"/>'
+        f'<w:left w:val="single" w:sz="{left_sz}" w:space="0" w:color="FF0000"/>'
+        f'<w:bottom w:val="single" w:sz="{bottom_sz}" w:space="0" w:color="FF0000"/>'
+        f'<w:right w:val="single" w:sz="{right_sz}" w:space="0" w:color="FF0000"/>'
+        '</w:tcBorders>'
+    )
+    tcPr.append(borders)
+
+def format_run_font(run, font_name="標楷體", size_pt=12, is_red=False, bold=False):
+    run.font.name = font_name
+    run._element.rPr.rFonts.set(qn('w:eastAsia'), font_name)
+    run.font.size = Pt(size_pt)
+    run.bold = bold
+    if is_red:
+        run.font.color.rgb = RGBColor(255, 0, 0)
+    else:
+        run.font.color.rgb = RGBColor(0, 0, 0)
+
+def generate_taipower_internal_memo_docx(unit_name, doc_no, file_no, retention, memo_text):
+    doc = docx.Document()
+    for section in doc.sections:
+        section.top_margin = Cm(1.5)
+        section.bottom_margin = Cm(1.5)
+        section.left_margin = Cm(2.0)
+        section.right_margin = Cm(2.0)
+
+    # 1. 頂部標題與右上角「文號 / 檔號 / 保存年限」區塊
+    header_tbl = doc.add_table(rows=3, cols=3)
+    header_tbl.alignment = WD_TABLE_ALIGNMENT.CENTER
+    header_tbl.autofit = False
+
+    col_widths_top = [Cm(10.5), Cm(2.2), Cm(4.3)]
+    for row in header_tbl.rows:
+        for idx, w in enumerate(col_widths_top):
+            row.cells[idx].width = w
+
+    # 合併左側 3 列作為「台灣電力公司 簽辦用紙」大標題區
+    title_cell = header_tbl.cell(0, 0).merge(header_tbl.cell(2, 0))
+    title_cell.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
+    p_title = title_cell.paragraphs[0]
+    p_title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    r_t1 = p_title.add_run("台灣電力公司 ")
+    format_run_font(r_t1, "標楷體", 20, is_red=True, bold=True)
+    r_t2 = p_title.add_run("簽辦用紙")
+    format_run_font(r_t2, "標楷體", 18, is_red=True, bold=True)
+
+    # 右上角三列紅框：文號、檔號、保存年限
+    meta_labels = [("文  號", doc_no), ("檔  號", file_no), ("保存年限", retention)]
+    for r_idx, (lbl, val) in enumerate(meta_labels):
+        c_lbl = header_tbl.cell(r_idx, 1)
+        c_val = header_tbl.cell(r_idx, 2)
+        set_cell_TopBottom_borders(c_lbl)
+        set_cell_TopBottom_borders(c_val)
+        p1 = c_lbl.paragraphs[0]
+        p1.alignment = WD_ALIGN_PARAGRAPH.DISTRIBUTE
+        r1 = p1.add_run(lbl)
+        format_run_font(r1, "標楷體", 10, is_red=True)
+
+        p2 = c_val.paragraphs[0]
+        r2 = p2.add_run(val)
+        format_run_font(r2, "標楷體", 10, is_red=False)
+
+    # 2. 主體紅框表格（左側：簽辦單位，右側：擬辦或會核意見）
+    main_tbl = doc.add_table(rows=13, cols=2)
+    main_tbl.alignment = WD_TABLE_ALIGNMENT.CENTER
+    main_tbl.autofit = False
+    set_red_table_borders(main_tbl)
+
+    for row in main_tbl.rows:
+        row.cells[0].width = Cm(2.5)
+        row.cells[1].width = Cm(14.5)
+
+    # 第一列：欄位紅字標題
+    h_left = main_tbl.cell(0, 0).paragraphs[0]
+    h_left.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    r_hl = h_left.add_run("簽辦單位")
+    format_run_font(r_hl, "標楷體", 12, is_red=True)
+
+    h_right = main_tbl.cell(0, 1).paragraphs[0]
+    h_right.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    r_hr = h_right.add_run("擬  辦  或  會  核  意  見")
+    format_run_font(r_hr, "標楷體", 12, is_red=True)
+
+    # 左側第二列填入簽辦單位（如：水工組）
+    u_p = main_tbl.cell(1, 0).paragraphs[0]
+    u_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    r_unit = u_p.add_run(unit_name)
+    format_run_font(r_unit, "標楷體", 14, is_red=False)
+
+    # 將右側第 1~12 列合併為「擬辦或會核意見」完整書寫區（保留左側橫格線視覺）
+    content_cell = main_tbl.cell(1, 1).merge(main_tbl.cell(12, 1))
+    first_p = True
+    for raw_line in memo_text.split("\n"):
+        clean_line = raw_line.replace("###", "").replace("**", "").strip()
+        if not clean_line:
+            continue
+        p = content_cell.paragraphs[0] if first_p else content_cell.add_paragraph()
+        first_p = False
+        p.paragraph_format.space_after = Pt(6)
+        p.paragraph_format.line_spacing = 1.35
+        r_line = p.add_run(clean_line)
+        format_run_font(r_line, "標楷體", 13, is_red=False)
+
+    # 補上陳核字樣（若內文未自帶）
+    if "陳核" not in memo_text and "陳 核" not in memo_text:
+        p_sign = content_cell.add_paragraph()
+        p_sign.paragraph_format.space_before = Pt(18)
+        r_sign = p_sign.add_run("  陳\n核")
+        format_run_font(r_sign, "標楷體", 14, is_red=False)
+
+    # 3. 底部頁碼：第 1 / 1 頁
+    p_foot = doc.add_paragraph()
+    p_foot.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+    r_f1 = p_foot.add_run("第 ")
+    format_run_font(r_f1, "標楷體", 10, is_red=True)
+    r_f2 = p_foot.add_run("1 / 1")
+    format_run_font(r_f2, "標楷體", 10, is_red=False)
+    r_f3 = p_foot.add_run(" 頁")
+    format_run_font(r_f3, "標楷體", 10, is_red=True)
+
+    buf = io.BytesIO()
+    doc.save(buf)
+    return buf.getvalue()
 
 db = load_db()
 users_db = db["users"]
@@ -304,14 +459,14 @@ if not st.session_state.current_user:
 raw_current_user = st.session_state.current_user
 current_user = users_db.get(raw_current_user, {}).get("display_name", raw_current_user)
 
-# ================= 檔案解析與匯入核心函數 (含 CAD 複雜向量圖防爆保護) =================
+# ================= 檔案解析與匯入核心函數 (含 CAD 複雜圖說與配筋表強化辨識) =================
 def ocr_with_gemini(file_bytes, mime_type):
     if not GEMINI_API_KEY:
         return ""
     client = genai.Client(api_key=GEMINI_API_KEY)
     prompt = (
-        "請完整、精準地辨識並轉錄這份工程公文、契約、圖表或照片中的所有繁體中文文字、文號、日期、表格數據與印章文字。"
-        "若有表格請以『欄位1 | 欄位2』格式呈現，不要遺漏任何細節。"
+        "請完整、精準地辨識並轉錄這份工程公文、契約、施工圖說、配筋表或照片中的所有繁體中文文字、文號、日期、表格數據與印章文字。"
+        "若遇到工程配筋表或表格，請務必將『構材編號（如 G1, B1, C1, S1, W1）』與對應的『位置、主筋、箍筋、號數、間距、保護層、搭接長度』完整配對並以『欄位1 | 欄位2』格式呈現，不要遺漏任何細節。"
     )
     for model_name in AVAILABLE_MODELS:
         try:
@@ -352,7 +507,6 @@ def extract_text_from_file(uploaded_file, cat1, cat2, cat3, uploader, enable_ocr
             try:
                 page_text = (page.extract_text() or "").strip()
             except Exception:
-                # ★ 防爆保護：當遇到 CAD 轉出之超高密度向量圖說導致 LimitReachedError 時，自動轉交 AI 視覺辨識！
                 page_text = ""
 
             if len(page_text) >= 25:
@@ -588,6 +742,8 @@ if "quick_upload_target" not in st.session_state:
     st.session_state.quick_upload_target = None
 if "edit_c3_target" not in st.session_state:
     st.session_state.edit_c3_target = None
+if "last_chat_files" not in st.session_state:
+    st.session_state.last_chat_files = []
 
 if st.session_state.get("upload_notice"):
     show_upload_success_dialog(st.session_state.upload_notice)
@@ -861,7 +1017,6 @@ with st.sidebar:
                                 if st.button(f"📄 {f}", key=f"dir_{c1}_{c2}_{c3}_{f}", use_container_width=True):
                                     st.session_state.jump_to_file = f
 
-    # ★ 升級：免填名稱也能自動命名的雲端與 Figma 捷徑管理
     with st.expander("☁️ 專案雲端與 Figma 捷徑", expanded=True):
         cloud_links = db.get("cloud_links", DEFAULT_CLOUD_LINKS)
         for lk in cloud_links:
@@ -1024,16 +1179,16 @@ if st.session_state.jump_to_file and st.session_state.jump_to_file in file_info_
             with st.expander(f"📄 {fc['location']}", expanded=True):
                 st.text(fc["content"])
 
-# ================= 核心六大分頁 =================
-tab_ai, tab_figma, tab_memo, tab_search, tab_batch, tab_read = st.tabs([
+# ================= 核心五大分頁（已將「讀全文」整併進「搜檔案」） =================
+tab_ai, tab_figma, tab_memo, tab_search, tab_batch = st.tabs([
     "💬 AI 問答",
     "🎨 流程圖 (Figma)",
     "📝 公文生成",
-    "🔎 搜檔案",
-    "📦 批次搬移與整理",
-    "📖 讀全文"
+    "🔎 搜檔案 & 讀全文",
+    "📦 批次搬移與整理"
 ])
 
+# ================= 💬 AI 問答（單一極簡對話視窗固定於下方，對齊外部主流 AI 體驗） =================
 with tab_ai:
     shortcuts = db.get("shortcuts", DEFAULT_SHORTCUTS)
     triggered_query = None
@@ -1043,82 +1198,33 @@ with tab_ai:
             if sc_cols[idx].button(sc_text, key=f"sc_{idx}", use_container_width=True):
                 triggered_query = sc_text
 
-    with st.expander("📋 直接複製貼上文字／表格 ＆ 📎 隨附臨時檔案問 AI（送出後自動清空絕不沾黏）", expanded=False):
-        p_col1, p_col2 = st.columns(2)
-        with p_col1:
-            pasted_context = st.text_area(
-                "📋 直接貼上臨時文字 / 公文草稿 / LINE 訊息 / 表格 (Ctrl+V)：",
-                height=115,
-                placeholder="在此直接 Ctrl+V 貼上任何文字或表格，下方提問時 AI 會自動納入比對..."
-            )
-        with p_col2:
-            temp_files = st.file_uploader(
-                "📎 或選擇臨時檔案 / 螢幕截圖：",
-                type=["pdf", "docx", "pptx", "xlsx", "txt", "jpg", "jpeg", "png"],
-                accept_multiple_files=True,
-                key="chat_temp_files"
-            )
-
-        if (pasted_context and pasted_context.strip()) or temp_files:
-            st.markdown("##### 💾 覺得上面的臨時內容很重要？可一鍵轉存進永久目錄：")
-            tc1, tc2, tc3, tc4, tc5 = st.columns([2, 2, 2, 2, 2])
-            with tc1:
-                save_t_c1 = st.selectbox("主夾：", list(folder_tree.keys()), key="st_c1")
-            with tc2:
-                save_t_c2 = st.selectbox("次夾：", list(folder_tree[save_t_c1].keys()), key="st_c2")
-            with tc3:
-                raw_st_c3 = folder_tree[save_t_c1][save_t_c2]
-                st_c3_opts = ["(無細夾 / 直接放第二層)"] + (raw_st_c3 if isinstance(raw_st_c3, list) else [])
-                st_c3_sel = st.selectbox("細夾：", st_c3_opts, key="st_c3_sel")
-                save_t_c3 = "" if st_c3_sel == "(無細夾 / 直接放第二層)" else st_c3_sel
-            with tc4:
-                pasted_fname = st.text_input("若存貼上文字之檔名：", value="臨時貼上資料.txt", key="st_fn")
-            with tc5:
-                st.write("")
-                if st.button("💾 存入永久目錄", type="primary", use_container_width=True):
-                    with st.spinner("💾 正在存入資料庫並同步備份至 GitHub..."):
-                        saved_details = []
-                        path_lbl = f"{save_t_c1} > {save_t_c2}" + (f" > {save_t_c3}" if save_t_c3 else "")
-                        if pasted_context and pasted_context.strip():
-                            fn_clean = pasted_fname.strip() or "臨時貼上資料.txt"
-                            if not fn_clean.endswith(".txt"):
-                                fn_clean += ".txt"
-                            db["chunks"] = [c for c in db["chunks"] if c["file_name"] != fn_clean]
-                            txt_val = pasted_context.strip()
-                            for i in range(0, len(txt_val), 900):
-                                db["chunks"].append({
-                                    "file_name": fn_clean, "cat1": save_t_c1, "cat2": save_t_c2, "cat3": save_t_c3,
-                                    "location": f"(段落 {i//900 + 1})", "content": txt_val[i:i+900], "uploader": current_user
-                                })
-                            saved_details.append(f"`{fn_clean}` ➔ 📂 **{path_lbl}**")
-                        if temp_files:
-                            for tf in temp_files:
-                                db["chunks"] = [c for c in db["chunks"] if c["file_name"] != tf.name]
-                                new_c, _ = extract_text_from_file(tf, save_t_c1, save_t_c2, save_t_c3, current_user, enable_ocr=True)
-                                db["chunks"].extend(new_c)
-                                saved_details.append(f"`{tf.name}` ➔ 📂 **{path_lbl}**")
-                        save_db(db)
-                        st.session_state.upload_notice = {
-                            "count": len(saved_details),
-                            "files": saved_details,
-                            "ocr_pages": 0
-                        }
-                        st.rerun()
-
     if "messages" not in st.session_state:
         st.session_state.messages = [
-            {"role": "assistant", "content": f"**{current_user}** 您好！您可以在下方輸入框**直接打字、按 `Ctrl+V` 直接貼上螢幕截圖**，或直接把檔案拉進左側最上方的「⚡ 智慧極速上傳」讓 AI 自動幫您歸檔！"}
+            {"role": "assistant", "content": f"**{current_user}** 您好！請直接在下方對話框打字、貼上文字、按 `Ctrl+V` 貼上螢幕截圖，或點擊 `➕` 夾帶檔案提問！"}
         ]
 
     for msg in st.session_state.messages:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
 
+    # 若上一輪對話有隨附臨時檔案，提供一鍵歸檔快捷鈕
+    if st.session_state.get("last_chat_files"):
+        with st.container(border=True):
+            col_arch1, col_arch2 = st.columns([3.5, 1.5])
+            with col_arch1:
+                f_names = "、".join([f.name for f in st.session_state.last_chat_files])
+                st.markdown(f"💡 **剛剛隨附了臨時檔案：** `{f_names}`，需要直接存入永久目錄嗎？")
+            with col_arch2:
+                if st.button("💾 AI 自動分類存入永久目錄", type="primary", use_container_width=True):
+                    if process_and_save_uploads(st.session_state.last_chat_files, mode="smart", enable_ocr=True):
+                        st.session_state.last_chat_files = []
+                        st.rerun()
+
     inline_files = []
     user_query = None
     try:
         chat_val = st.chat_input(
-            "請輸入問題（支援在此直接 Ctrl+V 貼上截圖，或夾帶檔案）...",
+            "請輸入問題、直接貼上文字，或按 Ctrl+V 貼上截圖 / 點擊 ➕ 夾帶檔案...",
             accept_file="multiple",
             file_type=["pdf", "docx", "pptx", "xlsx", "txt", "jpg", "jpeg", "png"]
         )
@@ -1139,13 +1245,8 @@ with tab_ai:
         user_query = triggered_query
 
     if user_query:
-        all_temp_files = list(temp_files or []) + inline_files
-        extra_tags = []
-        if all_temp_files:
-            extra_tags.append(f"📎 隨附 {len(all_temp_files)} 份檔案/截圖")
-        if pasted_context and pasted_context.strip():
-            extra_tags.append("📋 隨附貼上文字")
-        display_q = f"{user_query} *({'、'.join(extra_tags)})*" if extra_tags else user_query
+        st.session_state.last_chat_files = inline_files if inline_files else []
+        display_q = f"{user_query} *(📎 隨附 {len(inline_files)} 份檔案/截圖)*" if inline_files else user_query
 
         st.session_state.messages.append({"role": "user", "content": display_q})
         with st.chat_message("user"):
@@ -1163,11 +1264,8 @@ with tab_ai:
                 ]
 
                 temp_text_context = ""
-                if pasted_context and pasted_context.strip():
-                    temp_text_context += f"\n=== 使用者直接複製貼上之臨時文字/表格內容 ===\n{pasted_context.strip()}\n====================================\n"
-
                 multimodal_parts = []
-                for tf in all_temp_files:
+                for tf in inline_files:
                     lname = tf.name.lower()
                     if lname.endswith((".jpg", ".jpeg", ".png")):
                         mime = "image/png" if lname.endswith(".png") else "image/jpeg"
@@ -1186,7 +1284,6 @@ with tab_ai:
                         joined_t = "\n".join([f"{c['location']} {c['content']}" for c in t_chunks])
                         temp_text_context += f"\n=== 隨附臨時檔案：{tf.name} ===\n{joined_t[:15000]}\n"
 
-                # ★ 升級：嚴格禁止開頭問候、禁止重複問題、禁止結尾客套話，並強制將引用來源統一置於回答最下方！
                 system_prompt = f"""
 你是一位專業、嚴謹的工程專案 AI 顧問。請根據以下【內部工程資料庫檢索結果】與【臨時隨附資料】回答問題。
 
@@ -1248,7 +1345,7 @@ with tab_ai:
                 st.session_state.messages.append({"role": "assistant", "content": answer})
                 st.rerun()
 
-# ================= 🎨 流程圖 (Figma 互動內嵌與管理) 專屬分頁 =================
+# ================= 🎨 流程圖 (Figma 互動內嵌與管理，強化穩定度版) =================
 with tab_figma:
     f_head1, f_head2 = st.columns([4, 1.5])
     with f_head1:
@@ -1256,9 +1353,9 @@ with tab_figma:
     with f_head2:
         with st.popover("➕ 新增 / 管理 Figma 流程圖", use_container_width=True):
             st.markdown("##### 📌 新增 Figma 流程圖")
-            st.caption("💡 請確認 Figma 右上角 **Share** 權限已設為 `Anyone with the link can view`，直接貼上網址即可自動內嵌！")
+            st.caption("💡 請確認 Figma 右上角 **Share** 權限已設為 `Anyone with the link can view`，直接貼上網址或 `<iframe ...>` 語法即可！")
             fg_title = st.text_input("流程圖名稱 (可留空自動命名)：", placeholder="如：施工查驗與送審流程圖")
-            fg_url = st.text_input("Figma 分享連結 (URL)：", placeholder="https://www.figma.com/...")
+            fg_url = st.text_input("Figma 分享連結或 Embed 語法：", placeholder="https://www.figma.com/...")
             if st.button("💾 儲存並內嵌此流程圖", type="primary", use_container_width=True):
                 if fg_url.strip():
                     clean_fg_title = fg_title.strip() or "🎨 專案工程流程圖"
@@ -1286,7 +1383,7 @@ with tab_figma:
     if not figma_boards:
         st.info("👆 目前尚未加入 Figma 流程圖！請點擊右上角的 **「➕ 新增 / 管理 Figma 流程圖」**，將您的 Figma 網址貼上，即可在此直接縮放、拖曳瀏覽互動式流程圖！")
     else:
-        ctrl1, ctrl2, ctrl3 = st.columns([2.5, 1.5, 1.5])
+        ctrl1, ctrl2, ctrl3 = st.columns([2.2, 1.3, 2.0])
         with ctrl1:
             sel_fg_idx = st.selectbox(
                 "📂 選擇要檢視的流程圖看板：",
@@ -1295,32 +1392,56 @@ with tab_figma:
             )
         selected_board = figma_boards[sel_fg_idx]
         with ctrl2:
-            canvas_height = st.slider("📐 畫布顯示高度 (px)：", 500, 1200, 750, 50)
+            canvas_height = st.slider("📐 畫布高度 (px)：", 500, 1200, 750, 50)
         with ctrl3:
             st.write("")
-            st.link_button("🚀 在 Figma 新分頁開啟編輯", selected_board["url"], use_container_width=True)
+            raw_link = selected_board["url"]
+            if "iframe" in raw_link and "src=" in raw_link:
+                m = re.search(r'src=["\']([^"\']+)["\']', raw_link)
+                raw_link = m.group(1) if m else raw_link
+            st.link_button("🚀 畫面讀不到或想看全貌？點此直接開 Figma 新視窗", raw_link, type="primary", use_container_width=True)
 
+        st.caption("💡 **若下方畫布空白或一直轉圈圈**：通常是因為瀏覽器阻擋第三方 Cookie，或該 Figma 檔案未開啟 `Anyone with the link can view` 公開權限，請直接點擊右上角紅色按鈕於新分頁開啟！")
         embed_src = to_figma_embed_url(selected_board["url"])
         components.iframe(embed_src, height=canvas_height, scrolling=True)
 
-# ================= 📝 公文生成專屬分頁 =================
+# ================= 📝 公文生成專屬分頁（內建台電標準「簽辦用紙/內簽」紅框表單） =================
 with tab_memo:
-    st.markdown("### 📝 智慧公文生成與自動排版室")
-    st.caption("AI 將自動學習您上傳在資料庫中的歷史公文慣用語法、敘述風格與陳核對象，產出標準排版公文，並可一鍵下載 Word (.docx) 檔！")
+    st.markdown("### 📝 智慧公文生成與台電標準簽辦用紙排版室")
+    st.caption("AI 自動學習資料庫中的歷史公文語法與風格，支援一鍵匯出 **「台灣電力公司 簽辦用紙（紅框內簽標準表格）」** Word (.docx) 檔！")
 
-    memo_topic = st.text_area("📌 請輸入擬稿需求或事件摘要（例如：針對現場排水管線繞道變更設計，擬函請監造單位核定...）：", height=100)
+    memo_topic = st.text_area("📌 請輸入擬稿需求或事件摘要（例如：針對現場排水管線繞道變更設計，簽請核示辦理後續議價...）：", height=100)
     
     m_col1, m_col2 = st.columns(2)
     with m_col1:
-        memo_type = st.selectbox("📄 文別選擇：", ["函", "書函", "簽呈", "開會通知單", "紀錄"])
+        memo_type = st.selectbox("📄 文別與版型選擇：", [
+            "台電標準內簽 (台灣電力公司 簽辦用紙 紅框版)",
+            "外發函 (標準公文函)",
+            "書函",
+            "開會通知單",
+            "會議紀錄"
+        ])
     with m_col2:
-        memo_target = st.text_input("🏢 預定受文對象（如未填，AI 將自動從歷史公文學習判斷）：", placeholder="例如：台灣世曦工程顧問股份有限公司 / 監造單位")
+        memo_target = st.text_input("🏢 受文對象 / 陳核層級（如未填，AI 自動判斷）：", placeholder="例如：組長、處長 / 或 台灣世曦工程顧問公司")
+
+    # 若選擇台電標準內簽，顯示簽辦用紙表頭參數設定
+    unit_name_val, doc_no_val, file_no_val, retention_val = "水工組", "", "", ""
+    if "簽辦用紙" in memo_type:
+        u_c1, u_c2, u_c3, u_c4 = st.columns(4)
+        with u_c1:
+            unit_name_val = st.text_input("🏷️ 簽辦單位：", value="水工組")
+        with u_c2:
+            doc_no_val = st.text_input("🔢 文號 (選填)：", value="")
+        with u_c3:
+            file_no_val = st.text_input("📁 檔號 (選填)：", value="")
+        with u_c4:
+            retention_val = st.text_input("⏳ 保存年限 (選填)：", value="10年")
 
     if st.button("🚀 開始智慧擬稿與排版", type="primary", use_container_width=True):
         if not memo_topic.strip():
             st.warning("請先輸入擬稿需求！")
         else:
-            with st.spinner("🤖 AI 正在深度參考您的歷史公文風格、慣用語法、受文對象與內部資料庫契約規範進行擬稿中..."):
+            with st.spinner("🤖 AI 正在深度參考您的歷史公文風格、契約規範進行擬稿中..."):
                 memo_history_chunks = [
                     c for c in db["chunks"] 
                     if "公文" in c.get("cat1", "") or "公文" in c.get("cat2", "") or "往來" in c.get("cat2", "")
@@ -1328,24 +1449,39 @@ with tab_memo:
                 history_text = "\n".join([f"【參考範本：{c['file_name']}】\n{c['content']}" for c in memo_history_chunks[:10]])
                 contract_context = search_internal_db(memo_topic, db["chunks"], selected_cat1s, selected_cat2s, selected_cat3s)
 
+                is_internal_sign = "簽辦用紙" in memo_type
+                format_instruction = (
+                    "本次為【台灣電力公司 簽辦用紙（內部簽呈）】，請嚴格依以下結構輸出（不要輸出多餘的受文者或外發文號）：\n"
+                    "主旨：請簡明扼要敘明簽辦核心目的與擬辦事項。\n"
+                    "說明：\n"
+                    " 一、依據、背景事實或來文文號。\n"
+                    " 二、工程現場實況、契約條款規定或經費分析。\n"
+                    " 三、具體細項說明：\n"
+                    "  (一) ...\n"
+                    "  (二) ...\n"
+                    "擬辦：明確敘明請鈞長核示之具體執行方案。\n"
+                    "  陳\n核"
+                    if is_internal_sign else
+                    "請嚴格遵守標準工程公文格式，包含【受文者】、【主旨】、【說明】（分項條列一、二、三並自動換行）、【辦法】。"
+                )
+
                 memo_prompt = f"""
-你是一位專業、嚴謹的台電新建工程處資深工程祕書與主任工程師。擬稿人：{current_user}。
-請根據以下【歷史公文參考範本】（請徹底學習其慣用語法、敘述風格、排版結構與陳核對象習慣）以及【內部合約與資料庫檢索結果】，幫使用者產出一份標準的工程公文。
+你是一位專業、嚴謹的台灣電力公司資深工程師。擬稿人：{current_user}（簽辦單位：{unit_name_val}）。
+請根據以下【歷史公文參考範本】與【內部合約與資料庫檢索結果】，產出一份標準工程公文。
 
 【文別】：{memo_type}
-【受文對象】：{memo_target if memo_target.strip() else "請依歷史公文習慣自動判定"}
+【受文/陳核對象】：{memo_target if memo_target.strip() else "依台電工程內簽/公文慣例"}
 【擬稿核心需求】：{memo_topic}
 
-【歷史公文參考範本（請模仿其風格與慣用語）】：
-{history_text if history_text.strip() else "（目前尚無歷史公文，請依標準台電工程公文格式產出）"}
+【歷史公文參考範本（請模仿其慣用語氣）】：
+{history_text if history_text.strip() else "（請依標準台電工程公文格式產出）"}
 
 【內部合約與資料庫檢索結果】：
 {contract_context}
 
-【公文嚴格排版與內容規範】：
-1. 必須嚴格遵守標準公文格式，包含【受文者】、【主旨】（開頭空兩格，簡明扼要）、【說明】（分項條列（一）、（二）、（三）並自動空行換行）、【辦法】（明確指示後續辦理動作）。
-2. 絕對不允許文字全部擠在一起，段落之間必須有清晰的空行與縮排。
-3. 語氣必須符合工程實務之嚴謹、專業、具說服力，並符合擬稿人平常慣用的公文敘述口氣。
+【排版與內容鐵則】：
+1. 🚫 嚴禁任何 AI 開頭問候語或結尾客套話，第一行直接從公文正題（如「主旨：」或「受文者：」）開始輸出！
+2. {format_instruction}
 """
                 client = genai.Client(api_key=GEMINI_API_KEY)
                 memo_res = client.models.generate_content(
@@ -1355,39 +1491,60 @@ with tab_memo:
                 )
                 generated_memo_text = memo_res.text if memo_res and memo_res.text else "⚠️ 生成失敗，請稍後再試。"
                 st.session_state.last_generated_memo = generated_memo_text
+                st.session_state.last_memo_meta = {
+                    "is_internal": is_internal_sign,
+                    "unit": unit_name_val,
+                    "doc_no": doc_no_val,
+                    "file_no": file_no_val,
+                    "retention": retention_val
+                }
                 st.rerun()
 
     if st.session_state.get("last_generated_memo"):
         st.divider()
-        st.markdown("### 📄 產出之標準排版公文預覽：")
-        st.markdown(st.session_state.last_generated_memo)
+        st.markdown("### 📄 產出之公文內容（可直接於下方文字框微調後下載 Word）：")
+        edited_memo = st.text_area("✏️ 您可在此直接修改內文，下方按鈕會即時依修改後內容打包成標準 Word 檔：", value=st.session_state.last_generated_memo, height=320)
+        st.session_state.last_generated_memo = edited_memo
 
-        doc_gen = docx.Document()
-        doc_gen.add_heading(f"工程公文草稿 — {current_user} 擬", level=1)
-        for line in st.session_state.last_generated_memo.split("\n"):
-            if line.strip().startswith("###") or line.strip().startswith("【"):
-                doc_gen.add_heading(line.replace("#", "").strip(), level=2)
-            else:
-                doc_gen.add_paragraph(line)
-        
-        docx_buf = io.BytesIO()
-        doc_gen.save(docx_buf)
-        docx_bytes = docx_buf.getvalue()
+        meta = st.session_state.get("last_memo_meta", {"is_internal": True, "unit": "水工組", "doc_no": "", "file_no": "", "retention": ""})
+        if meta.get("is_internal", True):
+            docx_bytes = generate_taipower_internal_memo_docx(
+                unit_name=meta.get("unit", "水工組"),
+                doc_no=meta.get("doc_no", ""),
+                file_no=meta.get("file_no", ""),
+                retention=meta.get("retention", ""),
+                memo_text=edited_memo
+            )
+            dl_label = "📥 一鍵下載「台灣電力公司 簽辦用紙（紅框標準版）」Word 檔 (.docx)"
+            dl_fname = f"台電簽辦用紙_{meta.get('unit', '水工組')}_{current_user}.docx"
+        else:
+            doc_gen = docx.Document()
+            doc_gen.add_heading(f"工程公文草稿 — {current_user} 擬", level=1)
+            for line in edited_memo.split("\n"):
+                if line.strip().startswith("###") or line.strip().startswith("【"):
+                    doc_gen.add_heading(line.replace("#", "").strip(), level=2)
+                else:
+                    doc_gen.add_paragraph(line)
+            docx_buf = io.BytesIO()
+            doc_gen.save(docx_buf)
+            docx_bytes = docx_buf.getvalue()
+            dl_label = "📥 一鍵下載排版完整的公文 Word 檔 (.docx)"
+            dl_fname = f"工程公文草稿_{current_user}.docx"
 
         st.download_button(
-            label="📥 一鍵下載排版完整的 Word 檔 (.docx)",
+            label=dl_label,
             data=docx_bytes,
-            file_name=f"工程公文草稿_{current_user}.docx",
+            file_name=dl_fname,
             mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             type="primary",
             use_container_width=True
         )
 
-# ================= 🔎 搜尋分頁（清單總覽 ＋ 點擊折疊展開） =================
+# ================= 🔎 搜檔案 & 讀全文（關鍵字搜尋 ＋ 直接展開讀全文 二合一） =================
 with tab_search:
     col_s1, col_s2 = st.columns([3, 1])
     with col_s1:
-        search_kw = st.text_input("🔎 輸入關鍵字秒查檔案內文（多個詞用空白隔開，如：管 拔除 預算）：", placeholder="輸入後按 Enter 立即列出檔案清單...")
+        search_kw = st.text_input("🔎 輸入關鍵字秒查檔案內文（多個詞用空白隔開，如：水下作業 拔除 預算）：", placeholder="輸入後按 Enter 立即列出命中檔案清單，並可直接展開讀全文...")
     with col_s2:
         match_mode = st.radio("匹配模式：", ["包含任一 (OR)", "包含全部 (AND)"], horizontal=True)
 
@@ -1412,7 +1569,7 @@ with tab_search:
                 matched_results.append((hits, c))
 
         matched_results.sort(key=lambda x: x[0], reverse=True)
-        st.success(f"🎯 共找到符合條件的段落總計 **{len(matched_results)}** 處！以下為檔案清單總覽：")
+        st.success(f"🎯 共找到符合條件的段落總計 **{len(matched_results)}** 處！點擊下方檔案卡片可檢視命中段落，或直接展開該檔完整全文：")
 
         file_grouped_hits = {}
         for hits, item in matched_results:
@@ -1425,20 +1582,48 @@ with tab_search:
             file_grouped_hits[fname]["total_hits"] += hits
             file_grouped_hits[fname]["chunks"].append((hits, item))
 
-        st.caption("💡 點擊下方各檔案卡片即可展開／收合檢視詳細命中文內與螢光標記：")
-
         for fname, gdata in file_grouped_hits.items():
             c3_str = f" > {gdata['cat3']}" if gdata['cat3'] else " (直接放第二層)"
             card_title = f"📄 {fname} ｜ 🗂️ {gdata['cat1']} > {gdata['cat2']}{c3_str} ｜ 命中段落：{len(gdata['chunks'])} 處 (總計 {gdata['total_hits']} 次)"
             
             with st.expander(card_title, expanded=False):
-                for idx, (h_cnt, chk) in enumerate(gdata["chunks"], 1):
-                    st.markdown(f"**📍 命中位置：`{chk['location']}`** *(本段命中 {h_cnt} 次)*")
-                    hl_html = highlight_keywords(chk["content"], raw_kws).replace("\n", "<br>")
-                    st.markdown(f"<div style='background-color: #f8f9fa; padding: 10px; border-radius: 6px; font-size: 0.95rem; line-height: 1.6; border-left: 3px solid #ffc107;'>{hl_html}</div>", unsafe_allow_html=True)
-                    if idx < len(gdata["chunks"]):
-                        st.divider()
+                # ★ 整併功能：在搜尋結果卡片內，提供一鍵切換「只看命中段落」或「展開整份檔案全文」
+                view_mode = st.radio(
+                    "檢視模式：",
+                    ["🎯 只看關鍵字命中段落", f"📖 閱讀《{fname}》完整全文"],
+                    horizontal=True,
+                    key=f"vmode_{fname}"
+                )
+                if view_mode == "🎯 只看關鍵字命中段落":
+                    for idx, (h_cnt, chk) in enumerate(gdata["chunks"], 1):
+                        st.markdown(f"**📍 命中位置：`{chk['location']}`** *(本段命中 {h_cnt} 次)*")
+                        hl_html = highlight_keywords(chk["content"], raw_kws).replace("\n", "<br>")
+                        st.markdown(f"<div style='background-color: #f8f9fa; padding: 10px; border-radius: 6px; font-size: 0.95rem; line-height: 1.6; border-left: 3px solid #ffc107;'>{hl_html}</div>", unsafe_allow_html=True)
+                        if idx < len(gdata["chunks"]):
+                            st.divider()
+                else:
+                    all_file_chunks = [c for c in chunks if c["file_name"] == fname]
+                    st.info(f"📖 以下為《{fname}》的全部內容（共 {len(all_file_chunks)} 個段落/頁碼，關鍵字已自動螢光標記）：")
+                    for fc in all_file_chunks:
+                        st.markdown(f"**📄 {fc['location']}**")
+                        hl_full = highlight_keywords(fc["content"], raw_kws).replace("\n", "<br>")
+                        st.markdown(f"<div style='background-color: #ffffff; padding: 10px; border-radius: 6px; font-size: 0.92rem; line-height: 1.6; border: 1px solid #e0e0e0; margin-bottom: 8px;'>{hl_full}</div>", unsafe_allow_html=True)
 
+    st.divider()
+    with st.expander("📖 不搜關鍵字？點此直接從清單挑選檔案閱讀全文", expanded=not bool(search_kw.strip())):
+        if not file_info_map:
+            st.info("目前資料庫尚無檔案。")
+        else:
+            sorted_files = sorted(list(file_info_map.keys()))
+            default_idx = sorted_files.index(st.session_state.jump_to_file) if st.session_state.jump_to_file in sorted_files else 0
+            view_file = st.selectbox("選擇要閱讀完整全文的檔案：", sorted_files, index=default_idx)
+            vc1, vc2, vc3, vup = file_info_map[view_file]
+            st.caption(f"📂 三層路徑：**{vc1} > {vc2}{' > ' + vc3 if vc3 else ''}** ｜ 👤 上傳者：**{vup}**")
+            for fc in [c for c in chunks if c["file_name"] == view_file]:
+                with st.expander(f"📄 {fc['file_name']} — {fc['location']}", expanded=True):
+                    st.text(fc["content"])
+
+# ================= 📦 批次搬移與整理 =================
 with tab_batch:
     st.markdown("#### 📦 檔案批次搬移、改名與刪除總管")
     if not file_info_map:
@@ -1533,16 +1718,3 @@ with tab_batch:
                     save_db(db)
                 st.success(f"🗑️ 已批次刪除 {len(sel_names)} 份檔案！")
                 st.rerun()
-
-with tab_read:
-    if not file_info_map:
-        st.info("目前尚無檔案。")
-    else:
-        sorted_files = sorted(list(file_info_map.keys()))
-        default_idx = sorted_files.index(st.session_state.jump_to_file) if st.session_state.jump_to_file in sorted_files else 0
-        view_file = st.selectbox("選擇要閱讀的檔案：", sorted_files, index=default_idx)
-        vc1, vc2, vc3, vup = file_info_map[view_file]
-        st.caption(f"📂 三層路徑：**{vc1} > {vc2}{' > ' + vc3 if vc3 else ''}** ｜ 👤 上傳者：**{vup}**")
-        for fc in [c for c in chunks if c["file_name"] == view_file]:
-            with st.expander(f"📄 {fc['file_name']} — {fc['location']}", expanded=True):
-                st.text(fc["content"])
