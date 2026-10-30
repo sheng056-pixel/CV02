@@ -5,7 +5,10 @@ import hashlib
 import pickle
 import base64
 import urllib.parse
+from datetime import datetime, date
 import requests
+import pandas as pd
+import plotly.express as px
 import streamlit as st
 import streamlit.components.v1 as components
 from google import genai
@@ -15,10 +18,12 @@ import docx
 from docx.shared import Pt, RGBColor, Cm
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.table import WD_TABLE_ALIGNMENT, WD_ALIGN_VERTICAL
-from docx.oxml import OxmlElement, parse_xml
+from docx.oxml import parse_xml
 from docx.oxml.ns import qn, nsdecls
 from pptx import Presentation
 import openpyxl
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.utils import get_column_letter
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
@@ -43,6 +48,7 @@ GITHUB_TOKEN = st.secrets.get("GITHUB_TOKEN", "").strip()
 GITHUB_REPO = st.secrets.get("GITHUB_REPO", "").strip()
 DB_FILE = "engineering_knowledge_db.pkl"
 
+# ★ 已修復多模型自動備援清單（優先使用最穩定快速的官方模型）
 AVAILABLE_MODELS = ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash", "gemini-3.5-flash-lite", "gemini-3.5-flash"]
 
 DEFAULT_FOLDER_TREE_V7 = {
@@ -92,6 +98,22 @@ DEFAULT_CLOUD_LINKS = [
 ]
 
 DEFAULT_FIGMA_BOARDS = []
+
+# ★ 預設甘特圖排程資料（隧道明挖工法標準流程）
+DEFAULT_GANTT_DATA = [
+    {"項次": "1", "WBS": "1.0", "工項名稱": "施工前置與測量放樣", "預計開始日": "2026-11-01", "預計完成日": "2026-11-10", "工期(天)": 10, "進度(%)": 100, "狀態": "已完成", "是否要徑": False, "備註": "現地勘查與管線遷移"},
+    {"項次": "2", "WBS": "2.0", "工項名稱": "打全套管基樁 / 深基礎", "預計開始日": "2026-11-11", "預計完成日": "2026-12-10", "工期(天)": 30, "進度(%)": 60, "狀態": "進行中", "是否要徑": True, "備註": "兩側深基礎壁體"},
+    {"項次": "3", "WBS": "3.0", "工項名稱": "打鋼板樁（或連續壁）", "預計開始日": "2026-12-11", "預計完成日": "2026-12-31", "工期(天)": 21, "進度(%)": 0, "狀態": "未開始", "是否要徑": True, "備註": "防止土石崩塌與滲水"},
+    {"項次": "4", "WBS": "4.1", "工項名稱": "分層開挖（第一階）", "預計開始日": "2027-01-04", "預計完成日": "2027-01-18", "工期(天)": 15, "進度(%)": 0, "狀態": "未開始", "是否要徑": True, "備註": "配合開挖深度向下"},
+    {"項次": "5", "WBS": "4.2", "工項名稱": "搭設擋土支撐（H型鋼）", "預計開始日": "2027-01-19", "預計完成日": "2027-01-28", "工期(天)": 10, "進度(%)": 0, "狀態": "未開始", "是否要徑": False, "備註": "確保壁面穩定"},
+    {"項次": "6", "WBS": "5.1", "工項名稱": "繼續向下開挖至底面", "預計開始日": "2027-01-29", "預計完成日": "2027-02-15", "工期(天)": 18, "進度(%)": 0, "狀態": "未開始", "是否要徑": True, "備註": "挖至設計基礎底面"},
+    {"項次": "7", "WBS": "5.2", "工項名稱": "打底層混凝土（PC）", "預計開始日": "2027-02-16", "預計完成日": "2027-02-20", "工期(天)": 5, "進度(%)": 0, "狀態": "未開始", "是否要徑": False, "備註": "提供平整工作面"},
+    {"項次": "8", "WBS": "6.1", "工項名稱": "綁紮基礎鋼筋與模板組立", "預計開始日": "2027-02-21", "預計完成日": "2027-03-05", "工期(天)": 13, "進度(%)": 0, "狀態": "未開始", "是否要徑": True, "備註": "配置底版鋼筋與剪力筋"},
+    {"項次": "9", "WBS": "6.2", "工項名稱": "基礎版混凝土澆置與養護", "預計開始日": "2027-03-06", "預計完成日": "2027-03-12", "工期(天)": 7, "進度(%)": 0, "狀態": "未開始", "是否要徑": True, "備註": "大宗混凝土澆置"},
+    {"項次": "10", "WBS": "7.0", "工項名稱": "結構體主體施工（牆與頂版）", "預計開始日": "2027-03-13", "預計完成日": "2027-05-15", "工期(天)": 64, "進度(%)": 0, "狀態": "未開始", "是否要徑": True, "備註": "側牆、中柱與頂版"},
+    {"項次": "11", "WBS": "8.0", "工項名稱": "防水工程施作", "預計開始日": "2027-05-16", "預計完成日": "2027-05-31", "工期(天)": 16, "進度(%)": 0, "狀態": "未開始", "是否要徑": False, "備註": "外壁及頂版防水膜"},
+    {"項次": "12", "WBS": "9.0", "工項名稱": "分層回填與地表復原", "預計開始日": "2027-06-01", "預計完成日": "2027-06-20", "工期(天)": 20, "進度(%)": 0, "狀態": "未開始", "是否要徑": False, "備註": "分層夯實並恢復設施"}
+]
 
 ENGINEERING_SYNONYMS = {
     "浮實": ["浮時", "總浮時", "自由浮時", "浮動", "Total Float", "TF"],
@@ -193,6 +215,8 @@ def load_db():
                     "shortcuts": data.get("shortcuts", DEFAULT_SHORTCUTS.copy()),
                     "cloud_links": data.get("cloud_links", [dict(x) for x in DEFAULT_CLOUD_LINKS]),
                     "figma_boards": data.get("figma_boards", [dict(x) for x in DEFAULT_FIGMA_BOARDS]),
+                    "gantt_data": data.get("gantt_data", [dict(x) for x in DEFAULT_GANTT_DATA]),
+                    "gantt_title": data.get("gantt_title", "台電統包工程 — 隧道明挖工法施工進度甘特圖與排程管控表"),
                     "max_mb": data.get("max_mb", 80)
                 }
         except Exception:
@@ -204,6 +228,8 @@ def load_db():
         "shortcuts": DEFAULT_SHORTCUTS.copy(),
         "cloud_links": [dict(x) for x in DEFAULT_CLOUD_LINKS],
         "figma_boards": [dict(x) for x in DEFAULT_FIGMA_BOARDS],
+        "gantt_data": [dict(x) for x in DEFAULT_GANTT_DATA],
+        "gantt_title": "台電統包工程 — 隧道明挖工法施工進度甘特圖與排程管控表",
         "max_mb": 80
     }
 
@@ -214,7 +240,6 @@ def save_db(db_dict):
         with open(DB_FILE, "rb") as f:
             push_db_to_github(f.read())
 
-# ★ 升級版 Figma 內嵌網址轉換器（支援最新 embed.figma.com 標準，大幅提升讀取成功率）
 def to_figma_embed_url(raw_url):
     u = raw_url.strip()
     if "iframe" in u and "src=" in u:
@@ -231,6 +256,143 @@ def to_figma_embed_url(raw_url):
         return embed_u
     encoded = urllib.parse.quote(u, safe="")
     return f"https://www.figma.com/embed?embed_host=share&url={encoded}"
+
+# ================= 甘特圖 Excel 與開會列印報表匯出引擎 =================
+def generate_gantt_excel_bytes(gantt_list, title_text):
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "施工進度排程表"
+    ws.views.sheetView[0].showGridLines = True
+
+    ws.merge_cells("A1:J1")
+    title_cell = ws["A1"]
+    title_cell.value = title_text
+    title_cell.font = Font(name="標楷體", size=16, bold=True, color="FFFFFF")
+    title_cell.fill = PatternFill(start_color="1B365D", end_color="1B365D", fill_type="solid")
+    title_cell.alignment = Alignment(horizontal="center", vertical="center")
+    ws.row_dimensions[1].height = 35
+
+    headers = ["項次", "WBS", "工項名稱", "預計開始日", "預計完成日", "工期(天)", "進度(%)", "狀態", "是否要徑", "備註與工法說明"]
+    ws.append([])
+    ws.append(headers)
+    ws.row_dimensions[3].height = 25
+
+    header_fill = PatternFill(start_color="D9E1F2", end_color="D9E1F2", fill_type="solid")
+    header_font = Font(name="標楷體", size=11, bold=True, color="000000")
+    thin_border = Border(
+        left=Side(style='thin', color='BFBFBF'),
+        right=Side(style='thin', color='BFBFBF'),
+        top=Side(style='thin', color='BFBFBF'),
+        bottom=Side(style='thin', color='BFBFBF')
+    )
+
+    for col_num in range(1, len(headers) + 1):
+        cell = ws.cell(row=3, column=col_num)
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+        cell.border = thin_border
+
+    cp_fill = PatternFill(start_color="FCE4D6", end_color="FCE4D6", fill_type="solid")
+    for row_idx, r in enumerate(gantt_list, start=4):
+        is_cp = bool(r.get("是否要徑", False))
+        ws.append([
+            str(r.get("項次", "")),
+            str(r.get("WBS", "")),
+            str(r.get("工項名稱", "")),
+            str(r.get("預計開始日", "")),
+            str(r.get("預計完成日", "")),
+            int(r.get("工期(天)", 1)),
+            int(r.get("進度(%)", 0)),
+            str(r.get("狀態", "未開始")),
+            "🔥 是 (要徑)" if is_cp else "否",
+            str(r.get("備註", ""))
+        ])
+        ws.row_dimensions[row_idx].height = 22
+        for col_num in range(1, len(headers) + 1):
+            cell = ws.cell(row=row_idx, column=col_num)
+            cell.border = thin_border
+            cell.font = Font(name="標楷體", size=10, bold=is_cp, color="C00000" if (is_cp and col_num in [3, 9]) else "000000")
+            if is_cp:
+                cell.fill = cp_fill
+            if col_num in [1, 2, 4, 5, 8, 9]:
+                cell.alignment = Alignment(horizontal="center", vertical="center")
+            elif col_num in [6, 7]:
+                cell.alignment = Alignment(horizontal="right", vertical="center")
+            else:
+                cell.alignment = Alignment(horizontal="left", vertical="center")
+
+    for col in ws.columns:
+        max_len = max(len(str(cell.value or '')) for cell in col)
+        col_letter = get_column_letter(col[0].column)
+        ws.column_dimensions[col_letter].width = max(max_len + 4, 12)
+    ws.column_dimensions["C"].width = 32
+    ws.column_dimensions["J"].width = 30
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+def generate_printable_gantt_html(gantt_list, title_text, fig_html):
+    rows_html = ""
+    for r in gantt_list:
+        is_cp = bool(r.get("是否要徑", False))
+        bg = "background-color: #fff2f0; font-weight: bold;" if is_cp else ""
+        cp_badge = "<span style='color:#d93025;'>🔥 要徑</span>" if is_cp else "一般"
+        rows_html += f"""
+        <tr style="{bg}">
+            <td style="text-align:center;">{r.get('項次','')}</td>
+            <td style="text-align:center;">{r.get('WBS','')}</td>
+            <td>{r.get('工項名稱','')}</td>
+            <td style="text-align:center;">{r.get('預計開始日','')}</td>
+            <td style="text-align:center;">{r.get('預計完成日','')}</td>
+            <td style="text-align:right;">{r.get('工期(天)',0)} 天</td>
+            <td style="text-align:right;">{r.get('進度(%)',0)}%</td>
+            <td style="text-align:center;">{r.get('狀態','')}</td>
+            <td style="text-align:center;">{cp_badge}</td>
+            <td>{r.get('備註','')}</td>
+        </tr>
+        """
+    html_str = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="utf-8">
+        <title>{title_text}</title>
+        <style>
+            @page {{ size: A4 landscape; margin: 12mm; }}
+            body {{ font-family: "Microsoft JhengHei", "標楷體", sans-serif; color: #222; margin: 20px; }}
+            h2 {{ text-align: center; color: #1B365D; margin-bottom: 5px; }}
+            .sub {{ text-align: center; font-size: 13px; color: #555; margin-bottom: 15px; }}
+            .print-btn {{
+                display: block; margin: 0 auto 15px auto; padding: 10px 24px;
+                background: #d93025; color: white; border: none; border-radius: 6px;
+                font-size: 15px; font-weight: bold; cursor: pointer;
+            }}
+            table {{ width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 15px; }}
+            th {{ background-color: #1B365D; color: white; padding: 7px; border: 1px solid #999; }}
+            td {{ padding: 6px; border: 1px solid #ccc; }}
+            @media print {{ .print-btn {{ display: none; }} }}
+        </style>
+    </head>
+    <body>
+        <button class="print-btn" onclick="window.print()">🖨️ 點此直接列印或另存為橫向 PDF (Ctrl+P)</button>
+        <h2>{title_text}</h2>
+        <div class="sub">製表日期：{date.today().strftime('%Y-%m-%d')} ｜ 🔥 標記代表關鍵要徑 (Critical Path)</div>
+        <div>{fig_html}</div>
+        <table>
+            <thead>
+                <tr>
+                    <th>項次</th><th>WBS</th><th>工項名稱</th><th>預計開始日</th><th>預計完成日</th>
+                    <th>工期</th><th>進度</th><th>狀態</th><th>屬性</th><th>備註說明</th>
+                </tr>
+            </thead>
+            <tbody>{rows_html}</tbody>
+        </table>
+    </body>
+    </html>
+    """
+    return html_str.encode("utf-8")
 
 # ================= 台電標準「簽辦用紙（內簽）」紅框 Word 生成引擎 =================
 def set_red_table_borders(table):
@@ -277,7 +439,6 @@ def generate_taipower_internal_memo_docx(unit_name, doc_no, file_no, retention, 
         section.left_margin = Cm(2.0)
         section.right_margin = Cm(2.0)
 
-    # 1. 頂部標題與右上角「文號 / 檔號 / 保存年限」區塊
     header_tbl = doc.add_table(rows=3, cols=3)
     header_tbl.alignment = WD_TABLE_ALIGNMENT.CENTER
     header_tbl.autofit = False
@@ -287,7 +448,6 @@ def generate_taipower_internal_memo_docx(unit_name, doc_no, file_no, retention, 
         for idx, w in enumerate(col_widths_top):
             row.cells[idx].width = w
 
-    # 合併左側 3 列作為「台灣電力公司 簽辦用紙」大標題區
     title_cell = header_tbl.cell(0, 0).merge(header_tbl.cell(2, 0))
     title_cell.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
     p_title = title_cell.paragraphs[0]
@@ -297,7 +457,6 @@ def generate_taipower_internal_memo_docx(unit_name, doc_no, file_no, retention, 
     r_t2 = p_title.add_run("簽辦用紙")
     format_run_font(r_t2, "標楷體", 18, is_red=True, bold=True)
 
-    # 右上角三列紅框：文號、檔號、保存年限
     meta_labels = [("文  號", doc_no), ("檔  號", file_no), ("保存年限", retention)]
     for r_idx, (lbl, val) in enumerate(meta_labels):
         c_lbl = header_tbl.cell(r_idx, 1)
@@ -313,7 +472,6 @@ def generate_taipower_internal_memo_docx(unit_name, doc_no, file_no, retention, 
         r2 = p2.add_run(val)
         format_run_font(r2, "標楷體", 10, is_red=False)
 
-    # 2. 主體紅框表格（左側：簽辦單位，右側：擬辦或會核意見）
     main_tbl = doc.add_table(rows=13, cols=2)
     main_tbl.alignment = WD_TABLE_ALIGNMENT.CENTER
     main_tbl.autofit = False
@@ -323,7 +481,6 @@ def generate_taipower_internal_memo_docx(unit_name, doc_no, file_no, retention, 
         row.cells[0].width = Cm(2.5)
         row.cells[1].width = Cm(14.5)
 
-    # 第一列：欄位紅字標題
     h_left = main_tbl.cell(0, 0).paragraphs[0]
     h_left.alignment = WD_ALIGN_PARAGRAPH.CENTER
     r_hl = h_left.add_run("簽辦單位")
@@ -334,13 +491,11 @@ def generate_taipower_internal_memo_docx(unit_name, doc_no, file_no, retention, 
     r_hr = h_right.add_run("擬  辦  或  會  核  意  見")
     format_run_font(r_hr, "標楷體", 12, is_red=True)
 
-    # 左側第二列填入簽辦單位（如：水工組）
     u_p = main_tbl.cell(1, 0).paragraphs[0]
     u_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
     r_unit = u_p.add_run(unit_name)
     format_run_font(r_unit, "標楷體", 14, is_red=False)
 
-    # 將右側第 1~12 列合併為「擬辦或會核意見」完整書寫區（保留左側橫格線視覺）
     content_cell = main_tbl.cell(1, 1).merge(main_tbl.cell(12, 1))
     first_p = True
     for raw_line in memo_text.split("\n"):
@@ -354,14 +509,12 @@ def generate_taipower_internal_memo_docx(unit_name, doc_no, file_no, retention, 
         r_line = p.add_run(clean_line)
         format_run_font(r_line, "標楷體", 13, is_red=False)
 
-    # 補上陳核字樣（若內文未自帶）
     if "陳核" not in memo_text and "陳 核" not in memo_text:
         p_sign = content_cell.add_paragraph()
         p_sign.paragraph_format.space_before = Pt(18)
         r_sign = p_sign.add_run("  陳\n核")
         format_run_font(r_sign, "標楷體", 14, is_red=False)
 
-    # 3. 底部頁碼：第 1 / 1 頁
     p_foot = doc.add_paragraph()
     p_foot.alignment = WD_ALIGN_PARAGRAPH.RIGHT
     r_f1 = p_foot.add_run("第 ")
@@ -459,7 +612,7 @@ if not st.session_state.current_user:
 raw_current_user = st.session_state.current_user
 current_user = users_db.get(raw_current_user, {}).get("display_name", raw_current_user)
 
-# ================= 檔案解析與匯入核心函數 (含 CAD 複雜圖說與配筋表強化辨識) =================
+# ================= 檔案解析與匯入核心函數 =================
 def ocr_with_gemini(file_bytes, mime_type):
     if not GEMINI_API_KEY:
         return ""
@@ -665,13 +818,13 @@ def process_and_save_uploads(uploaded_files, mode="manual", target_c1="", target
         }
     return True
 
-# ================= 彈出視窗：匯入通知、指定快傳、第三層細夾編輯 =================
+# ================= 彈出視窗 =================
 @st.dialog("🎉 檔案極速匯入成功！")
 def show_upload_success_dialog(info):
     st.success(f"✅ 已成功將 **{info['count']}** 份檔案寫入資料庫並自動同步至 GitHub！")
     if info.get("ocr_pages", 0) > 0:
         st.info(f"👁️ 內含 **{info['ocr_pages']}** 頁掃描影像或複雜圖說，已透過 AI 視覺辨識轉為可搜尋文字！")
-    st.markdown("**📄 本次歸檔清單與路徑（若想換位置可於目錄點擊改名/搬移）：**")
+    st.markdown("**📄 本次歸檔清單與路徑：**")
     for item_str in info.get("files", []):
         st.markdown(f"- {item_str}")
     if st.button("👌 太棒了，我知道了", type="primary", use_container_width=True):
@@ -683,7 +836,6 @@ def show_quick_folder_upload_dialog(target_info):
     tc1, tc2, tc3 = target_info
     path_str = f"{tc1} > {tc2}" + (f" > {tc3}" if tc3 else " (直接放第二層)")
     st.markdown(f"📂 **目標鎖定路徑：** `{path_str}`")
-    st.caption("💡 直接將電腦中的檔案拖拉進下方框內，**手放開就會立刻自動開始匯入**，免按確認鈕！")
     q_ocr = st.checkbox("👁️ 掃描檔與複雜圖說自動 AI 辨識 (OCR)", value=True, key="q_dlg_ocr")
     q_files = st.file_uploader(
         "請拖曳或選擇檔案：",
@@ -764,7 +916,7 @@ def expand_query_with_synonyms(query):
             client = genai.Client(api_key=GEMINI_API_KEY)
             res = client.models.generate_content(
                 model=AVAILABLE_MODELS[0],
-                contents=f"請針對工程合約與詳細價目表中的查詢詞『{query}』，列出 3 至 5 個常見的工程同義詞、細部規格或相關工項名稱（例如查管子可聯想 PVC, PE, 鋼管, 排水管；查拆除可聯想打除, 拔除, 既有結構）。請直接用空白隔開輸出這些詞彙，不要輸出其他多餘文字。",
+                contents=f"請針對工程合約與詳細價目表中的查詢詞『{query}』，列出 3 至 5 個常見的工程同義詞、細部規格或相關工項名稱。請直接用空白隔開輸出這些詞彙，不要輸出其他多餘文字。",
                 config=types.GenerateContentConfig(temperature=0.1)
             )
             if res and res.text:
@@ -838,7 +990,7 @@ for c in chunks:
 
 db_size_mb = os.path.getsize(DB_FILE) / (1024 * 1024) if os.path.exists(DB_FILE) else 0.0
 
-# ================= 左側導覽：極速上傳 ＋ 展開就地編輯目錄 ＋ 動態捷徑 =================
+# ================= 左側導覽 =================
 with st.sidebar:
     col_u1, col_u2 = st.columns([3, 2])
     with col_u1:
@@ -851,9 +1003,8 @@ with st.sidebar:
 
     st.caption(f"📊 檔案：**{len(file_info_map)}** 份 ｜ 容量：**{db_size_mb:.2f} MB**")
 
-    # ★ 黃金組合 1：AI 智慧極速拖曳區
     with st.expander("⚡ 智慧極速上傳 (AI 自動歸檔)", expanded=True):
-        st.caption("💡 直接將多份檔案拖進下方框內，**手放開即自動依檔名分類並存入 GitHub**，免選資料夾、免按確認！")
+        st.caption("💡 直接將多份檔案拖進下方框內，**手放開即自動依檔名分類並存入 GitHub**！")
         smart_ocr = st.checkbox("👁️ 掃描檔與圖說自動 AI 辨識 (OCR)", value=True, key="smart_ocr_chk")
         smart_files = st.file_uploader(
             f"拖拉檔案至此 (單檔上限 {max_mb_limit}MB)",
@@ -865,7 +1016,6 @@ with st.sidebar:
             if process_and_save_uploads(smart_files, mode="smart", enable_ocr=smart_ocr):
                 st.rerun()
 
-    # ★ 黃金組合 3：手動指定資料夾上傳
     with st.expander("➕ 手動指定資料夾上傳", expanded=False):
         up_c1 = st.selectbox("1. 第一層 (主夾)：", list(folder_tree.keys()))
         up_c2 = st.selectbox("2. 第二層 (次夾)：", list(folder_tree[up_c1].keys()))
@@ -897,10 +1047,7 @@ with st.sidebar:
                     if process_and_save_uploads(uploaded_files, mode="manual", target_c1=up_c1, target_c2=up_c2, target_c3=up_c3, enable_ocr=enable_ocr_upload):
                         st.rerun()
 
-    # ★ 展開目錄即可「直接原地改名、新增子夾、刪除」＋ 點 📥 直接傳
     with st.expander("📁 目錄 (展開可直接改名 / 點 📥 快傳)", expanded=True):
-        st.caption("💡 展開資料夾可**直接改名或新增子夾**；點 `📥` 直接傳檔：")
-        
         c_top1, c_top2 = st.columns([3, 2])
         with c_top1:
             show_empty_dirs = st.checkbox("顯示空資料夾", value=True)
@@ -918,7 +1065,7 @@ with st.sidebar:
             if not show_empty_dirs and not c1_files:
                 continue
             with st.expander(f"🗂️ {c1} ({len(c1_files)})", expanded=False):
-                with st.popover(f"✏️ 管理「{c1}」(改名 / 新增次夾 / 刪除)", use_container_width=True):
+                with st.popover(f"✏️ 管理「{c1}」", use_container_width=True):
                     ren_c1_val = st.text_input("✏️ 修改第1層主夾名稱：", value=c1, key=f"in_ren_c1_{c1}")
                     if st.button("💾 儲存主夾名稱", key=f"btn_ren_c1_{c1}", type="primary", use_container_width=True):
                         clean_c1 = ren_c1_val.strip()
@@ -930,7 +1077,7 @@ with st.sidebar:
                             save_db(db)
                             st.rerun()
                     st.divider()
-                    add_c2_val = st.text_input("➕ 在此主夾下新增「第2層次夾」：", key=f"in_add_c2_{c1}")
+                    add_c2_val = st.text_input("➕ 新增「第2層次夾」：", key=f"in_add_c2_{c1}")
                     if st.button("➕ 新增次夾", key=f"btn_add_c2_{c1}", use_container_width=True) and add_c2_val.strip():
                         if add_c2_val.strip() not in folder_tree[c1]:
                             folder_tree[c1][add_c2_val.strip()] = ["一般文件"]
@@ -947,15 +1094,13 @@ with st.sidebar:
                                     c["cat1"], c["cat2"], c["cat3"] = fb1, fb2, ""
                             save_db(db)
                             st.rerun()
-                        else:
-                            st.warning("至少需保留一個主夾！")
 
                 for c2, c3_list in list(c2_dict.items()):
                     c2_files = [f for f, (fc1, fc2, _, _) in file_info_map.items() if fc1 == c1 and fc2 == c2]
                     if not show_empty_dirs and not c2_files:
                         continue
                     with st.expander(f"📂 {c2} ({len(c2_files)})", expanded=False):
-                        with st.popover(f"✏️ 管理「{c2}」(改名 / 新增細夾 / 刪除)", use_container_width=True):
+                        with st.popover(f"✏️ 管理「{c2}」", use_container_width=True):
                             ren_c2_val = st.text_input("✏️ 修改第2層次夾名稱：", value=c2, key=f"in_ren_c2_{c1}_{c2}")
                             if st.button("💾 儲存次夾名稱", key=f"btn_ren_c2_{c1}_{c2}", type="primary", use_container_width=True):
                                 clean_c2 = ren_c2_val.strip()
@@ -967,7 +1112,7 @@ with st.sidebar:
                                     save_db(db)
                                     st.rerun()
                             st.divider()
-                            add_c3_val = st.text_input("➕ 在此次夾下新增「第3層細夾」：", key=f"in_add_c3_{c1}_{c2}")
+                            add_c3_val = st.text_input("➕ 新增「第3層細夾」：", key=f"in_add_c3_{c1}_{c2}")
                             if st.button("➕ 新增細夾", key=f"btn_add_c3_{c1}_{c2}", use_container_width=True) and add_c3_val.strip():
                                 if add_c3_val.strip() not in folder_tree[c1][c2]:
                                     folder_tree[c1][c2].append(add_c3_val.strip())
@@ -983,15 +1128,13 @@ with st.sidebar:
                                             c["cat2"], c["cat3"] = fb2, ""
                                     save_db(db)
                                     st.rerun()
-                                else:
-                                    st.warning("至少需保留一個次夾！")
 
                         col_d2_title, col_d2_btn = st.columns([4, 1])
                         with col_d2_title:
                             no_c3_files = sorted([f for f, (fc1, fc2, fc3, _) in file_info_map.items() if fc1 == c1 and fc2 == c2 and not fc3])
                             st.markdown(f"**🏷️ (直接放第二層)** `({len(no_c3_files)})`")
                         with col_d2_btn:
-                            if st.button("📥", key=f"qup_{c1}_{c2}_none", help=f"直接上傳檔案至：{c1} > {c2}"):
+                            if st.button("📥", key=f"qup_{c1}_{c2}_none"):
                                 st.session_state.quick_upload_target = (c1, c2, "")
                                 st.rerun()
                         for f in no_c3_files:
@@ -1006,11 +1149,11 @@ with st.sidebar:
                             with col_d3_title:
                                 st.markdown(f"**🏷️ {c3}** `({len(c3_files)})`")
                             with col_d3_edit:
-                                if st.button("✏️", key=f"edc3_{c1}_{c2}_{c3}", help=f"改名或刪除細夾：{c3}"):
+                                if st.button("✏️", key=f"edc3_{c1}_{c2}_{c3}"):
                                     st.session_state.edit_c3_target = (c1, c2, c3)
                                     st.rerun()
                             with col_d3_up:
-                                if st.button("📥", key=f"qup_{c1}_{c2}_{c3}", help=f"直接上傳檔案至：{c1} > {c2} > {c3}"):
+                                if st.button("📥", key=f"qup_{c1}_{c2}_{c3}"):
                                     st.session_state.quick_upload_target = (c1, c2, c3)
                                     st.rerun()
                             for f in c3_files:
@@ -1025,20 +1168,16 @@ with st.sidebar:
             st.markdown(f"[🎨 {fb['title']} (開新視窗)]({fb['url']})")
 
         with st.popover("✏️ 管理捷徑連結", use_container_width=True):
-            st.markdown("##### ➕ 新增外部捷徑連結")
-            nl_title = st.text_input("連結顯示名稱 (可留空自動命名)：", placeholder="如：📁 變更設計雲端夾", key="nl_t")
-            nl_url = st.text_input("網址 (URL)：", placeholder="https://...", key="nl_u")
-            if st.button("➕ 新增捷徑", type="primary", use_container_width=True):
-                if not nl_url.strip():
-                    st.warning("⚠️ 請貼上網址 (URL)！")
-                else:
-                    clean_url = nl_url.strip()
-                    clean_title = nl_title.strip() or ("🎨 Figma 流程圖" if "figma.com" in clean_url.lower() else "🔗 外部雲端捷徑")
-                    db.setdefault("cloud_links", []).append({"title": clean_title, "url": clean_url})
-                    if "figma.com" in clean_url.lower():
-                        db.setdefault("figma_boards", []).append({"title": clean_title, "url": clean_url})
-                    save_db(db)
-                    st.rerun()
+            nl_title = st.text_input("連結顯示名稱：", key="nl_t")
+            nl_url = st.text_input("網址 (URL)：", key="nl_u")
+            if st.button("➕ 新增捷徑", type="primary", use_container_width=True) and nl_url.strip():
+                clean_url = nl_url.strip()
+                clean_title = nl_title.strip() or ("🎨 Figma 流程圖" if "figma.com" in clean_url.lower() else "🔗 外部雲端捷徑")
+                db.setdefault("cloud_links", []).append({"title": clean_title, "url": clean_url})
+                if "figma.com" in clean_url.lower():
+                    db.setdefault("figma_boards", []).append({"title": clean_title, "url": clean_url})
+                save_db(db)
+                st.rerun()
             if cloud_links:
                 st.divider()
                 del_lk_idx = st.selectbox("選擇要移除的捷徑：", range(len(cloud_links)), format_func=lambda i: cloud_links[i]["title"], key="del_lk")
@@ -1062,7 +1201,7 @@ with st.sidebar:
     if raw_current_user == "聖引":
         with st.expander("👥 帳號管理 (聖引專屬)", expanded=False):
             new_u = st.text_input("➕ 新增工號/帳號：")
-            new_name = st.text_input("設定中文姓名 (如：小明)：")
+            new_name = st.text_input("設定中文姓名：")
             new_p = st.text_input("設定密碼：", value=TEAM_PASSWORD)
             if st.button("新增帳號", use_container_width=True) and new_u.strip():
                 users_db[new_u.strip()] = {
@@ -1071,7 +1210,6 @@ with st.sidebar:
                     "display_name": new_name.strip() or new_u.strip()
                 }
                 save_db(db)
-                st.success(f"已新增：{new_u.strip()} ({new_name})")
                 st.rerun()
             st.divider()
             ed_u = st.selectbox("選擇帳號：", list(users_db.keys()))
@@ -1083,16 +1221,12 @@ with st.sidebar:
                     users_db[ed_u]["password"] = ed_p.strip() or TEAM_PASSWORD
                     users_db[ed_u]["display_name"] = ed_name.strip() or ed_u
                     save_db(db)
-                    st.success("已更新！")
                     st.rerun()
             with u2:
-                if st.button("🗑️ 刪除帳號", use_container_width=True):
-                    if ed_u != "聖引":
-                        del users_db[ed_u]
-                        save_db(db)
-                        st.rerun()
-                    else:
-                        st.warning("最高管理員「聖引」不可刪除！")
+                if st.button("🗑️ 刪除帳號", use_container_width=True) and ed_u != "聖引":
+                    del users_db[ed_u]
+                    save_db(db)
+                    st.rerun()
 
     with st.expander("💾 手動備份與還原", expanded=False):
         if os.path.exists(DB_FILE):
@@ -1104,7 +1238,6 @@ with st.sidebar:
                 f.write(restore_file.getvalue())
             db = load_db()
             save_db(db)
-            st.success("已還原並同步！")
             st.rerun()
 
     enable_web_search = st.checkbox("🌐 Google 聯網搜尋", value=False)
@@ -1163,15 +1296,13 @@ if st.session_state.jump_to_file and st.session_state.jump_to_file in file_info_
                         if c["file_name"] == j_file:
                             c["file_name"] = clean_qn
                             c["cat1"], c["cat2"], c["cat3"] = q_c1, q_c2, q_c3
-                    with st.spinner("💾 正在儲存並同步至 GitHub..."):
-                        save_db(db)
+                    save_db(db)
                     st.session_state.jump_to_file = clean_qn
                     st.rerun()
             with qb2:
                 if st.button("🗑️ 刪除此檔案", key="q_del", use_container_width=True):
                     db["chunks"] = [c for c in chunks if c["file_name"] != j_file]
-                    with st.spinner("🗑️ 正在刪除並同步至 GitHub..."):
-                        save_db(db)
+                    save_db(db)
                     st.session_state.jump_to_file = None
                     st.rerun()
 
@@ -1179,16 +1310,17 @@ if st.session_state.jump_to_file and st.session_state.jump_to_file in file_info_
             with st.expander(f"📄 {fc['location']}", expanded=True):
                 st.text(fc["content"])
 
-# ================= 核心五大分頁（已將「讀全文」整併進「搜檔案」） =================
-tab_ai, tab_figma, tab_memo, tab_search, tab_batch = st.tabs([
+# ================= 核心六大分頁（新增「📊 施工進度甘特圖」） =================
+tab_ai, tab_gantt, tab_figma, tab_memo, tab_search, tab_batch = st.tabs([
     "💬 AI 問答",
+    "📊 施工進度甘特圖",
     "🎨 流程圖 (Figma)",
     "📝 公文生成",
     "🔎 搜檔案 & 讀全文",
     "📦 批次搬移與整理"
 ])
 
-# ================= 💬 AI 問答（單一極簡對話視窗固定於下方，對齊外部主流 AI 體驗） =================
+# ================= 💬 AI 問答 =================
 with tab_ai:
     shortcuts = db.get("shortcuts", DEFAULT_SHORTCUTS)
     triggered_query = None
@@ -1207,7 +1339,6 @@ with tab_ai:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
 
-    # 若上一輪對話有隨附臨時檔案，提供一鍵歸檔快捷鈕
     if st.session_state.get("last_chat_files"):
         with st.container(border=True):
             col_arch1, col_arch2 = st.columns([3.5, 1.5])
@@ -1270,7 +1401,7 @@ with tab_ai:
                     if lname.endswith((".jpg", ".jpeg", ".png")):
                         mime = "image/png" if lname.endswith(".png") else "image/jpeg"
                         multimodal_parts.append(types.Part.from_bytes(data=tf.getvalue(), mime_type=mime))
-                        temp_text_context += f"\n【隨附影像/截圖：{tf.name}（請直接觀看影像內容並對照內部資料庫回答）】\n"
+                        temp_text_context += f"\n【隨附影像/截圖：{tf.name}】\n"
                     elif lname.endswith(".pdf"):
                         t_chunks, _ = extract_text_from_file(tf, "臨時", "臨時", "", current_user, enable_ocr=False)
                         if t_chunks:
@@ -1278,7 +1409,7 @@ with tab_ai:
                             temp_text_context += f"\n=== 隨附臨時檔案：{tf.name} ===\n{joined_t[:15000]}\n"
                         else:
                             multimodal_parts.append(types.Part.from_bytes(data=tf.getvalue(), mime_type="application/pdf"))
-                            temp_text_context += f"\n【隨附掃描PDF：{tf.name}（請直接視覺閱讀此PDF內容）】\n"
+                            temp_text_context += f"\n【隨附掃描PDF：{tf.name}】\n"
                     else:
                         t_chunks, _ = extract_text_from_file(tf, "臨時", "臨時", "", current_user, enable_ocr=False)
                         joined_t = "\n".join([f"{c['location']} {c['content']}" for c in t_chunks])
@@ -1291,12 +1422,10 @@ with tab_ai:
 {", ".join(file_summary) if file_summary else "尚未匯入文件"}
 
 【回答格式與排版鐵則（請嚴格遵守）】：
-1. 🚫 嚴禁開頭廢話與重複問題：絕對不要輸出「XX你好，我是工程專案主任工程師...」、「針對你提出的問題：『...』，經檢索內部資料庫，答覆如下：」等開場白！第一行請直接給出核心結論或答案！
-2. 🚫 嚴禁結尾客套話：回答結束時，絕對不要輸出「以上說明提供給您作為參考，若後續有其他需求歡迎隨時提出討論」之類的結尾詞。
-3. 📚 參考依據與出處統一置底：在正文敘述中，請保持版面乾淨易讀，不要在句子中間穿插冗長的目錄路徑。請在整篇回答的**最下方**，獨立列出一個「**📚 參考依據與出處：**」區塊，逐一條列本次回答所引用的完整出處（格式：`• 【目錄：第1層 > 第2層 > 第3層｜來源：檔名 (頁碼/列數)】`）。
-4. 工程詳細價目表/工項智能對應：查詢特定工項時，主動納入同義詞與細部規格比對。
-5. 會議決議與施工天數統計：若問決議過程請依日期列出時間軸；若問施工日期請逐一列出日報日期並計算總天數。
-6. 嚴禁瞎掰：若資料庫未載明，請直接告知「目前內部文件未載明」。
+1. 🚫 嚴禁開頭廢話與重複問題：第一行請直接給出核心結論或答案！
+2. 🚫 嚴禁結尾客套話。
+3. 📚 參考依據與出處統一置底：請在整篇回答的最下方獨立列出「**📚 參考依據與出處：**」區塊。
+4. 嚴禁瞎掰：若資料庫未載明，請直接告知「目前內部文件未載明」。
 
 {temp_text_context}
 
@@ -1325,17 +1454,6 @@ with tab_ai:
                         break
                     except Exception as e:
                         last_error = str(e)
-                        if enable_web_search and ("429" in last_error or "RESOURCE_EXHAUSTED" in last_error):
-                            try:
-                                response = client.models.generate_content(
-                                    model=model_name,
-                                    contents=contents_payload,
-                                    config=types.GenerateContentConfig(temperature=0.2)
-                                )
-                                answer = response.text
-                                break
-                            except Exception as e2:
-                                last_error = str(e2)
                         continue
 
                 if not answer:
@@ -1345,34 +1463,298 @@ with tab_ai:
                 st.session_state.messages.append({"role": "assistant", "content": answer})
                 st.rerun()
 
-# ================= 🎨 流程圖 (Figma 互動內嵌與管理，強化穩定度版) =================
+# ================= 📊 施工進度甘特圖（開會互動專區：左表雙擊修改 ＋ 右圖動態縮放 ＋ Excel/PDF 匯出） =================
+with tab_gantt:
+    gantt_list = db.get("gantt_data", DEFAULT_GANTT_DATA)
+    gantt_title = db.get("gantt_title", "台電統包工程 — 隧道明挖工法施工進度甘特圖與排程管控表")
+
+    # 頂部開會儀表板與標題編輯
+    g_top1, g_top2 = st.columns([3.5, 1.5])
+    with g_top1:
+        new_g_title = st.text_input("📌 專案排程表名稱（開會報告標題）：", value=gantt_title)
+        if new_g_title.strip() != gantt_title:
+            db["gantt_title"] = new_g_title.strip()
+            save_db(db)
+            st.rerun()
+    with g_top2:
+        with st.popover("📤 匯入 Excel 排程表 / 重置範本", use_container_width=True):
+            st.markdown("##### 📥 從 Excel 匯入更新排程")
+            st.caption("支援將本系統匯出的 `.xlsx` 修改後重新丟回，甘特圖將自動更新！")
+            up_gantt_xlsx = st.file_uploader("選擇排程 Excel (.xlsx)：", type=["xlsx"], key="up_gantt_excel")
+            if up_gantt_xlsx and st.button("⚡ 立即覆蓋匯入排程", type="primary", use_container_width=True):
+                try:
+                    df_in = pd.read_excel(up_gantt_xlsx, header=2)
+                    new_g_rows = []
+                    for idx, row in df_in.iterrows():
+                        w_name = str(row.get("工項名稱", "")).strip()
+                        if not w_name or w_name == "nan":
+                            continue
+                        s_str = str(row.get("預計開始日", "2026-11-01"))[:10]
+                        e_str = str(row.get("預計完成日", "2026-11-10"))[:10]
+                        try:
+                            d_days = max(1, (pd.to_datetime(e_str) - pd.to_datetime(s_str)).days + 1)
+                        except Exception:
+                            d_days = int(row.get("工期(天)", 10))
+                        cp_raw = str(row.get("是否要徑", ""))
+                        is_cp_val = ("是" in cp_raw) or ("要徑" in cp_raw) or (cp_raw.lower() == "true")
+                        new_g_rows.append({
+                            "項次": str(row.get("項次", idx + 1)),
+                            "WBS": str(row.get("WBS", f"{idx+1}.0")),
+                            "工項名稱": w_name,
+                            "預計開始日": s_str,
+                            "預計完成日": e_str,
+                            "工期(天)": d_days,
+                            "進度(%)": int(float(row.get("進度(%)", 0) or 0)),
+                            "狀態": str(row.get("狀態", "未開始")),
+                            "是否要徑": is_cp_val,
+                            "備註": str(row.get("備註與工法說明", row.get("備註", "")))
+                        })
+                    if new_g_rows:
+                        db["gantt_data"] = new_g_rows
+                        save_db(db)
+                        st.success(f"✅ 已成功匯入 {len(new_g_rows)} 筆工項！")
+                        st.rerun()
+                except Exception as ex:
+                    st.error(f"匯入失敗，請確認欄位格式：{ex}")
+            st.divider()
+            if st.button("🔄 還原為「隧道明挖工法」預設範本", use_container_width=True):
+                db["gantt_data"] = [dict(x) for x in DEFAULT_GANTT_DATA]
+                save_db(db)
+                st.rerun()
+
+    # 計算關鍵統計指標
+    total_tasks = len(gantt_list)
+    cp_tasks = sum(1 for r in gantt_list if r.get("是否要徑", False))
+    done_tasks = sum(1 for r in gantt_list if r.get("狀態") == "已完成" or int(r.get("進度(%)", 0)) >= 100)
+    try:
+        min_start = min(pd.to_datetime([r["預計開始日"] for r in gantt_list])).strftime("%Y-%m-%d")
+        max_end = max(pd.to_datetime([r["預計完成日"] for r in gantt_list])).strftime("%Y-%m-%d")
+        total_span_days = (pd.to_datetime(max_end) - pd.to_datetime(min_start)).days + 1
+    except Exception:
+        min_start, max_end, total_span_days = "-", "-", 0
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("📋 總工項數", f"{total_tasks} 項", f"已完成 {done_tasks} 項")
+    m2.metric("🔥 關鍵要徑 (Critical Path)", f"{cp_tasks} 項", "重點控管工期")
+    m3.metric("📅 專案預計起訖", f"{min_start} ～ {max_end}")
+    m4.metric("⏳ 總日曆天數跨度", f"{total_span_days} 天")
+
+    # 篩選與檢視控制列
+    f_col1, f_col2, f_col3, f_col4 = st.columns([1.8, 1.8, 1.4, 1.5])
+    with f_col1:
+        filter_cp_only = st.checkbox("🔥 只顯示關鍵要徑 (Critical Path)", value=False)
+    with f_col2:
+        status_opts = ["全部狀態", "進行中", "未開始", "已完成", "進度落後"]
+        filter_status = st.selectbox("🔍 狀態過濾：", status_opts, label_visibility="collapsed")
+    with f_col3:
+        color_mode = st.radio("🎨 圖表著色依據：", ["依要徑與狀態", "依完成進度(%)"], horizontal=True, label_visibility="collapsed")
+    with f_col4:
+        show_today_line = st.checkbox("📍 顯示今日基準紅線", value=True)
+
+    # 過濾顯示用資料
+    filtered_gantt = []
+    for r in gantt_list:
+        if filter_cp_only and not r.get("是否要徑", False):
+            continue
+        if filter_status != "全部狀態" and r.get("狀態") != filter_status:
+            continue
+        filtered_gantt.append(r)
+
+    # 繪製 Plotly 互動式甘特圖
+    fig_html_for_print = ""
+    if filtered_gantt:
+        df_plot = pd.DataFrame(filtered_gantt)
+        df_plot["Start"] = pd.to_datetime(df_plot["預計開始日"], errors="coerce")
+        df_plot["Finish"] = pd.to_datetime(df_plot["預計完成日"], errors="coerce") + pd.Timedelta(days=1)
+        df_plot["Y軸標籤"] = df_plot.apply(
+            lambda x: f"{'🔥 ' if x.get('是否要徑') else ''}[{x.get('WBS','')}] {x.get('工項名稱','')} ({x.get('工期(天)',0)}天)",
+            axis=1
+        )
+        df_plot["類別顯示"] = df_plot.apply(
+            lambda x: "🔥 關鍵要徑 (Critical Path)" if x.get("是否要徑") else f"🟢 一般工項 ({x.get('狀態','未開始')})",
+            axis=1
+        )
+        df_plot["條上文字"] = df_plot.apply(
+            lambda x: f"{x.get('工期(天)',0)}天 ({x.get('進度(%)',0)}%)",
+            axis=1
+        )
+
+        if color_mode == "依要徑與狀態":
+            color_map = {
+                "🔥 關鍵要徑 (Critical Path)": "#D93025",
+                "🟢 一般工項 (已完成)": "#2E7D32",
+                "🟢 一般工項 (進行中)": "#1976D2",
+                "🟢 一般工項 (未開始)": "#546E7A",
+                "🟢 一般工項 (進度落後)": "#F57C00"
+            }
+            fig = px.timeline(
+                df_plot,
+                x_start="Start",
+                x_end="Finish",
+                y="Y軸標籤",
+                color="類別顯示",
+                color_discrete_map=color_map,
+                text="條上文字",
+                hover_name="工項名稱",
+                hover_data={
+                    "Start": False, "Finish": False, "Y軸標籤": False,
+                    "WBS": True, "預計開始日": True, "預計完成日": True,
+                    "工期(天)": True, "進度(%)": True, "狀態": True, "備註": True
+                }
+            )
+        else:
+            fig = px.timeline(
+                df_plot,
+                x_start="Start",
+                x_end="Finish",
+                y="Y軸標籤",
+                color="進度(%)",
+                color_continuous_scale="RdYlGn",
+                range_color=[0, 100],
+                text="條上文字",
+                hover_name="工項名稱",
+                hover_data={
+                    "Start": False, "Finish": False, "Y軸標籤": False,
+                    "WBS": True, "預計開始日": True, "預計完成日": True,
+                    "工期(天)": True, "進度(%)": True, "狀態": True, "備註": True
+                }
+            )
+
+        fig.update_yaxes(autorange="reversed", title="")
+        fig.update_xaxes(
+            title="工程時程軸 (可框選局部放大、雙擊恢復全貌)",
+            tickformat="%Y/%m/%d",
+            showgrid=True,
+            gridcolor="#E0E0E0"
+        )
+        fig.update_traces(textposition="inside", insidetextanchor="middle")
+        chart_h = max(420, len(df_plot) * 42 + 110)
+        fig.update_layout(
+            height=chart_h,
+            margin=dict(l=10, r=20, t=35, b=35),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1, title=""),
+            font=dict(family="Microsoft JhengHei, sans-serif", size=13),
+            plot_bgcolor="#FFFFFF"
+        )
+
+        if show_today_line:
+            today_str = date.today().strftime("%Y-%m-%d")
+            fig.add_vline(x=today_str, line_width=2, line_dash="dash", line_color="#D93025")
+            fig.add_annotation(
+                x=today_str, y=1.02, yref="paper",
+                text=f"📍 今日 ({today_str})", showarrow=False,
+                font=dict(color="#D93025", size=12, weight="bold")
+            )
+
+        st.plotly_chart(fig, use_container_width=True, config={"displaylogo": False, "toImageButtonOptions": {"format": "png", "filename": "工程甘特圖", "scale": 2}})
+        fig_html_for_print = fig.to_html(full_html=False, include_plotlyjs="cdn")
+    else:
+        st.warning("目前篩選條件下無對應工項。")
+
+    # 一鍵匯出工具列（Excel / 開會列印版橫向 PDF 報表）
+    dl_col1, dl_col2 = st.columns(2)
+    with dl_col1:
+        excel_bytes = generate_gantt_excel_bytes(gantt_list, gantt_title)
+        st.download_button(
+            label="📥 匯出精美 Excel 進度排程表 (.xlsx)",
+            data=excel_bytes,
+            file_name=f"{gantt_title}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            type="primary",
+            use_container_width=True
+        )
+    with dl_col2:
+        printable_html_bytes = generate_printable_gantt_html(gantt_list, gantt_title, fig_html_for_print)
+        st.download_button(
+            label="🖨️ 匯出開會用橫向 PDF 報表 (下載後點開即印)",
+            data=printable_html_bytes,
+            file_name=f"{gantt_title}_開會報表.html",
+            mime="text/html",
+            use_container_width=True
+        )
+
+    st.divider()
+    st.markdown("#### ✏️ 開會現場即時排程編輯表（雙擊格子即可修改日期、進度、勾選要徑，亦可於最下方新增工項列）")
+    st.caption("💡 修改「預計開始日」或「預計完成日」後，點擊下方 **「💾 儲存排程變更並重算甘特圖」**，系統會自動計算工期天數並更新上方圖表！")
+
+    df_edit = pd.DataFrame(gantt_list)
+    df_edit["預計開始日"] = pd.to_datetime(df_edit["預計開始日"], errors="coerce").dt.date
+    df_edit["預計完成日"] = pd.to_datetime(df_edit["預計完成日"], errors="coerce").dt.date
+
+    edited_gantt_df = st.data_editor(
+        df_edit,
+        num_rows="dynamic",
+        column_config={
+            "項次": st.column_config.TextColumn("項次", width="small"),
+            "WBS": st.column_config.TextColumn("WBS", width="small"),
+            "工項名稱": st.column_config.TextColumn("📌 工項名稱 (雙擊可改)", width="medium", required=True),
+            "預計開始日": st.column_config.DateColumn("📅 預計開始日", format="YYYY-MM-DD", required=True),
+            "預計完成日": st.column_config.DateColumn("📅 預計完成日", format="YYYY-MM-DD", required=True),
+            "工期(天)": st.column_config.NumberColumn("⏳ 工期(天) [自動重算]", disabled=True, width="small"),
+            "進度(%)": st.column_config.NumberColumn("📈 進度(%)", min_value=0, max_value=100, step=5, format="%d%%", width="small"),
+            "狀態": st.column_config.SelectboxColumn("狀態", options=["未開始", "進行中", "已完成", "進度落後"], width="small"),
+            "是否要徑": st.column_config.CheckboxColumn("🔥 關鍵要徑", default=False, width="small"),
+            "備註": st.column_config.TextColumn("📝 備註與工法說明", width="large")
+        },
+        hide_index=True,
+        use_container_width=True,
+        key="gantt_table_editor"
+    )
+
+    if st.button("💾 儲存排程變更並重算甘特圖 (同步備份至 GitHub)", type="primary", use_container_width=True):
+        updated_list = []
+        for idx, row in edited_gantt_df.iterrows():
+            w_name = str(row.get("工項名稱", "")).strip()
+            if not w_name or w_name == "None":
+                continue
+            s_d = row.get("預計開始日")
+            e_d = row.get("預計完成日")
+            s_str = s_d.strftime("%Y-%m-%d") if pd.notnull(s_d) and hasattr(s_d, "strftime") else "2026-11-01"
+            e_str = e_d.strftime("%Y-%m-%d") if pd.notnull(e_d) and hasattr(e_d, "strftime") else s_str
+            try:
+                calc_days = max(1, (pd.to_datetime(e_str) - pd.to_datetime(s_str)).days + 1)
+            except Exception:
+                calc_days = 1
+            prog_v = int(row.get("進度(%)", 0)) if pd.notnull(row.get("進度(%)")) else 0
+            stat_v = str(row.get("狀態", "未開始")) if pd.notnull(row.get("狀態")) else "未開始"
+            if prog_v >= 100:
+                stat_v = "已完成"
+            updated_list.append({
+                "項次": str(row.get("項次") or (len(updated_list) + 1)),
+                "WBS": str(row.get("WBS") or f"{len(updated_list) + 1}.0"),
+                "工項名稱": w_name,
+                "預計開始日": s_str,
+                "預計完成日": e_str,
+                "工期(天)": calc_days,
+                "進度(%)": prog_v,
+                "狀態": stat_v,
+                "是否要徑": bool(row.get("是否要徑", False)),
+                "備註": str(row.get("備註") or "")
+            })
+        db["gantt_data"] = updated_list
+        with st.spinner("💾 正在重算工期並同步至 GitHub..."):
+            save_db(db)
+        st.success("✅ 排程與甘特圖已更新！")
+        st.rerun()
+
+# ================= 🎨 流程圖 (Figma) =================
 with tab_figma:
     f_head1, f_head2 = st.columns([4, 1.5])
     with f_head1:
         st.markdown("### 🎨 專案工程流程圖與架構看板 (Figma 互動內嵌)")
     with f_head2:
         with st.popover("➕ 新增 / 管理 Figma 流程圖", use_container_width=True):
-            st.markdown("##### 📌 新增 Figma 流程圖")
-            st.caption("💡 請確認 Figma 右上角 **Share** 權限已設為 `Anyone with the link can view`，直接貼上網址或 `<iframe ...>` 語法即可！")
-            fg_title = st.text_input("流程圖名稱 (可留空自動命名)：", placeholder="如：施工查驗與送審流程圖")
+            fg_title = st.text_input("流程圖名稱：", placeholder="如：施工查驗與送審流程圖")
             fg_url = st.text_input("Figma 分享連結或 Embed 語法：", placeholder="https://www.figma.com/...")
             if st.button("💾 儲存並內嵌此流程圖", type="primary", use_container_width=True):
                 if fg_url.strip():
                     clean_fg_title = fg_title.strip() or "🎨 專案工程流程圖"
-                    db.setdefault("figma_boards", []).append({
-                        "title": clean_fg_title,
-                        "url": fg_url.strip()
-                    })
-                    with st.spinner("💾 正在儲存並同步至 GitHub..."):
-                        save_db(db)
+                    db.setdefault("figma_boards", []).append({"title": clean_fg_title, "url": fg_url.strip()})
+                    save_db(db)
                     st.rerun()
-                else:
-                    st.warning("請貼上 Figma 網址！")
-
             figma_list = db.get("figma_boards", [])
             if figma_list:
                 st.divider()
-                st.markdown("##### 🗑️ 移除現有流程圖")
                 del_fg_idx = st.selectbox("選擇要移除的項目：", range(len(figma_list)), format_func=lambda i: figma_list[i]["title"])
                 if st.button("🗑️ 刪除此流程圖", use_container_width=True):
                     db["figma_boards"].pop(del_fg_idx)
@@ -1381,15 +1763,11 @@ with tab_figma:
 
     figma_boards = db.get("figma_boards", [])
     if not figma_boards:
-        st.info("👆 目前尚未加入 Figma 流程圖！請點擊右上角的 **「➕ 新增 / 管理 Figma 流程圖」**，將您的 Figma 網址貼上，即可在此直接縮放、拖曳瀏覽互動式流程圖！")
+        st.info("👆 目前尚未加入 Figma 流程圖！請點擊右上角的 **「➕ 新增 / 管理 Figma 流程圖」** 貼上網址即可！")
     else:
         ctrl1, ctrl2, ctrl3 = st.columns([2.2, 1.3, 2.0])
         with ctrl1:
-            sel_fg_idx = st.selectbox(
-                "📂 選擇要檢視的流程圖看板：",
-                range(len(figma_boards)),
-                format_func=lambda i: f"🎨 {figma_boards[i]['title']}"
-            )
+            sel_fg_idx = st.selectbox("📂 選擇看板：", range(len(figma_boards)), format_func=lambda i: f"🎨 {figma_boards[i]['title']}")
         selected_board = figma_boards[sel_fg_idx]
         with ctrl2:
             canvas_height = st.slider("📐 畫布高度 (px)：", 500, 1200, 750, 50)
@@ -1399,19 +1777,17 @@ with tab_figma:
             if "iframe" in raw_link and "src=" in raw_link:
                 m = re.search(r'src=["\']([^"\']+)["\']', raw_link)
                 raw_link = m.group(1) if m else raw_link
-            st.link_button("🚀 畫面讀不到或想看全貌？點此直接開 Figma 新視窗", raw_link, type="primary", use_container_width=True)
+            st.link_button("🚀 畫面讀不到？點此直接開 Figma 新視窗", raw_link, type="primary", use_container_width=True)
 
-        st.caption("💡 **若下方畫布空白或一直轉圈圈**：通常是因為瀏覽器阻擋第三方 Cookie，或該 Figma 檔案未開啟 `Anyone with the link can view` 公開權限，請直接點擊右上角紅色按鈕於新分頁開啟！")
         embed_src = to_figma_embed_url(selected_board["url"])
         components.iframe(embed_src, height=canvas_height, scrolling=True)
 
-# ================= 📝 公文生成專屬分頁（內建台電標準「簽辦用紙/內簽」紅框表單） =================
+# ================= 📝 公文生成（已修復多模型自動備援，不會再跳 ServerError） =================
 with tab_memo:
     st.markdown("### 📝 智慧公文生成與台電標準簽辦用紙排版室")
-    st.caption("AI 自動學習資料庫中的歷史公文語法與風格，支援一鍵匯出 **「台灣電力公司 簽辦用紙（紅框內簽標準表格）」** Word (.docx) 檔！")
+    st.caption("支援一鍵匯出 **「台灣電力公司 簽辦用紙（紅框內簽標準表格）」** 或標準外發函 Word (.docx) 檔！")
 
-    memo_topic = st.text_area("📌 請輸入擬稿需求或事件摘要（例如：針對現場排水管線繞道變更設計，簽請核示辦理後續議價...）：", height=100)
-    
+    memo_topic = st.text_area("📌 請輸入擬稿需求或事件摘要：", height=100)
     m_col1, m_col2 = st.columns(2)
     with m_col1:
         memo_type = st.selectbox("📄 文別與版型選擇：", [
@@ -1422,9 +1798,8 @@ with tab_memo:
             "會議紀錄"
         ])
     with m_col2:
-        memo_target = st.text_input("🏢 受文對象 / 陳核層級（如未填，AI 自動判斷）：", placeholder="例如：組長、處長 / 或 台灣世曦工程顧問公司")
+        memo_target = st.text_input("🏢 受文對象 / 陳核層級：", placeholder="例如：吉興工程顧問有限公司 / 或 組長、處長")
 
-    # 若選擇台電標準內簽，顯示簽辦用紙表頭參數設定
     unit_name_val, doc_no_val, file_no_val, retention_val = "水工組", "", "", ""
     if "簽辦用紙" in memo_type:
         u_c1, u_c2, u_c3, u_c4 = st.columns(4)
@@ -1451,36 +1826,27 @@ with tab_memo:
 
                 is_internal_sign = "簽辦用紙" in memo_type
                 format_instruction = (
-                    "本次為【台灣電力公司 簽辦用紙（內部簽呈）】，請嚴格依以下結構輸出（不要輸出多餘的受文者或外發文號）：\n"
-                    "主旨：請簡明扼要敘明簽辦核心目的與擬辦事項。\n"
-                    "說明：\n"
-                    " 一、依據、背景事實或來文文號。\n"
-                    " 二、工程現場實況、契約條款規定或經費分析。\n"
-                    " 三、具體細項說明：\n"
-                    "  (一) ...\n"
-                    "  (二) ...\n"
-                    "擬辦：明確敘明請鈞長核示之具體執行方案。\n"
-                    "  陳\n核"
+                    "本次為【台灣電力公司 簽辦用紙（內部簽呈）】，請依序輸出：主旨、說明（一、二、三...）、擬辦、陳核。"
                     if is_internal_sign else
-                    "請嚴格遵守標準工程公文格式，包含【受文者】、【主旨】、【說明】（分項條列一、二、三並自動換行）、【辦法】。"
+                    "請嚴格遵守標準工程公文格式，包含【受文者】、【主旨】、【說明】（分項條列一、二、三）、【辦法】。"
                 )
 
                 memo_prompt = f"""
 你是一位專業、嚴謹的台灣電力公司資深工程師。擬稿人：{current_user}（簽辦單位：{unit_name_val}）。
-請根據以下【歷史公文參考範本】與【內部合約與資料庫檢索結果】，產出一份標準工程公文。
+請根據以下資訊產出一份標準工程公文。
 
 【文別】：{memo_type}
-【受文/陳核對象】：{memo_target if memo_target.strip() else "依台電工程內簽/公文慣例"}
+【受文/陳核對象】：{memo_target if memo_target.strip() else "依台電工程公文慣例"}
 【擬稿核心需求】：{memo_topic}
 
-【歷史公文參考範本（請模仿其慣用語氣）】：
+【歷史公文參考範本】：
 {history_text if history_text.strip() else "（請依標準台電工程公文格式產出）"}
 
 【內部合約與資料庫檢索結果】：
 {contract_context}
 
 【排版與內容鐵則】：
-1. 🚫 嚴禁任何 AI 開頭問候語或結尾客套話，第一行直接從公文正題（如「主旨：」或「受文者：」）開始輸出！
+1. 🚫 嚴禁任何 AI 開頭問候語或結尾客套話，第一行直接從公文正題開始輸出！
 2. {format_instruction}
 """
                 client = genai.Client(api_key=GEMINI_API_KEY)
@@ -1502,6 +1868,7 @@ with tab_memo:
 
                 if not generated_memo_text:
                     generated_memo_text = f"⚠️ 公文生成伺服器暫時忙碌，請再按一次生成按鈕試試！({last_err})"
+
                 st.session_state.last_generated_memo = generated_memo_text
                 st.session_state.last_memo_meta = {
                     "is_internal": is_internal_sign,
@@ -1514,8 +1881,7 @@ with tab_memo:
 
     if st.session_state.get("last_generated_memo"):
         st.divider()
-        st.markdown("### 📄 產出之公文內容（可直接於下方文字框微調後下載 Word）：")
-        edited_memo = st.text_area("✏️ 您可在此直接修改內文，下方按鈕會即時依修改後內容打包成標準 Word 檔：", value=st.session_state.last_generated_memo, height=320)
+        edited_memo = st.text_area("✏️ 您可在此直接微調內文，下方按鈕會即時打包成標準 Word 檔：", value=st.session_state.last_generated_memo, height=320)
         st.session_state.last_generated_memo = edited_memo
 
         meta = st.session_state.get("last_memo_meta", {"is_internal": True, "unit": "水工組", "doc_no": "", "file_no": "", "retention": ""})
@@ -1552,11 +1918,11 @@ with tab_memo:
             use_container_width=True
         )
 
-# ================= 🔎 搜檔案 & 讀全文（關鍵字搜尋 ＋ 直接展開讀全文 二合一） =================
+# ================= 🔎 搜檔案 & 讀全文 =================
 with tab_search:
     col_s1, col_s2 = st.columns([3, 1])
     with col_s1:
-        search_kw = st.text_input("🔎 輸入關鍵字秒查檔案內文（多個詞用空白隔開，如：水下作業 拔除 預算）：", placeholder="輸入後按 Enter 立即列出命中檔案清單，並可直接展開讀全文...")
+        search_kw = st.text_input("🔎 輸入關鍵字秒查檔案內文（多個詞用空白隔開）：")
     with col_s2:
         match_mode = st.radio("匹配模式：", ["包含任一 (OR)", "包含全部 (AND)"], horizontal=True)
 
@@ -1581,7 +1947,7 @@ with tab_search:
                 matched_results.append((hits, c))
 
         matched_results.sort(key=lambda x: x[0], reverse=True)
-        st.success(f"🎯 共找到符合條件的段落總計 **{len(matched_results)}** 處！點擊下方檔案卡片可檢視命中段落，或直接展開該檔完整全文：")
+        st.success(f"🎯 共找到符合條件的段落總計 **{len(matched_results)}** 處！")
 
         file_grouped_hits = {}
         for hits, item in matched_results:
@@ -1595,42 +1961,29 @@ with tab_search:
             file_grouped_hits[fname]["chunks"].append((hits, item))
 
         for fname, gdata in file_grouped_hits.items():
-            c3_str = f" > {gdata['cat3']}" if gdata['cat3'] else " (直接放第二層)"
-            card_title = f"📄 {fname} ｜ 🗂️ {gdata['cat1']} > {gdata['cat2']}{c3_str} ｜ 命中段落：{len(gdata['chunks'])} 處 (總計 {gdata['total_hits']} 次)"
-            
+            c3_str = f" > {gdata['cat3']}" if gdata['cat3'] else ""
+            card_title = f"📄 {fname} ｜ 🗂️ {gdata['cat1']} > {gdata['cat2']}{c3_str} ｜ 命中：{len(gdata['chunks'])} 處"
             with st.expander(card_title, expanded=False):
-                # ★ 整併功能：在搜尋結果卡片內，提供一鍵切換「只看命中段落」或「展開整份檔案全文」
-                view_mode = st.radio(
-                    "檢視模式：",
-                    ["🎯 只看關鍵字命中段落", f"📖 閱讀《{fname}》完整全文"],
-                    horizontal=True,
-                    key=f"vmode_{fname}"
-                )
+                view_mode = st.radio("檢視模式：", ["🎯 只看關鍵字命中段落", f"📖 閱讀《{fname}》完整全文"], horizontal=True, key=f"vmode_{fname}")
                 if view_mode == "🎯 只看關鍵字命中段落":
                     for idx, (h_cnt, chk) in enumerate(gdata["chunks"], 1):
-                        st.markdown(f"**📍 命中位置：`{chk['location']}`** *(本段命中 {h_cnt} 次)*")
+                        st.markdown(f"**📍 命中位置：`{chk['location']}`**")
                         hl_html = highlight_keywords(chk["content"], raw_kws).replace("\n", "<br>")
-                        st.markdown(f"<div style='background-color: #f8f9fa; padding: 10px; border-radius: 6px; font-size: 0.95rem; line-height: 1.6; border-left: 3px solid #ffc107;'>{hl_html}</div>", unsafe_allow_html=True)
-                        if idx < len(gdata["chunks"]):
-                            st.divider()
+                        st.markdown(f"<div style='background-color: #f8f9fa; padding: 10px; border-radius: 6px; border-left: 3px solid #ffc107;'>{hl_html}</div>", unsafe_allow_html=True)
                 else:
-                    all_file_chunks = [c for c in chunks if c["file_name"] == fname]
-                    st.info(f"📖 以下為《{fname}》的全部內容（共 {len(all_file_chunks)} 個段落/頁碼，關鍵字已自動螢光標記）：")
-                    for fc in all_file_chunks:
+                    for fc in [c for c in chunks if c["file_name"] == fname]:
                         st.markdown(f"**📄 {fc['location']}**")
                         hl_full = highlight_keywords(fc["content"], raw_kws).replace("\n", "<br>")
-                        st.markdown(f"<div style='background-color: #ffffff; padding: 10px; border-radius: 6px; font-size: 0.92rem; line-height: 1.6; border: 1px solid #e0e0e0; margin-bottom: 8px;'>{hl_full}</div>", unsafe_allow_html=True)
+                        st.markdown(f"<div style='background-color: #ffffff; padding: 10px; border-radius: 6px; border: 1px solid #e0e0e0; margin-bottom: 8px;'>{hl_full}</div>", unsafe_allow_html=True)
 
     st.divider()
-    with st.expander("📖 不搜關鍵字？點此直接從清單挑選檔案閱讀全文", expanded=not bool(search_kw.strip())):
+    with st.expander("📖 直接從清單挑選檔案閱讀全文", expanded=not bool(search_kw.strip())):
         if not file_info_map:
             st.info("目前資料庫尚無檔案。")
         else:
             sorted_files = sorted(list(file_info_map.keys()))
             default_idx = sorted_files.index(st.session_state.jump_to_file) if st.session_state.jump_to_file in sorted_files else 0
             view_file = st.selectbox("選擇要閱讀完整全文的檔案：", sorted_files, index=default_idx)
-            vc1, vc2, vc3, vup = file_info_map[view_file]
-            st.caption(f"📂 三層路徑：**{vc1} > {vc2}{' > ' + vc3 if vc3 else ''}** ｜ 👤 上傳者：**{vup}**")
             for fc in [c for c in chunks if c["file_name"] == view_file]:
                 with st.expander(f"📄 {fc['file_name']} — {fc['location']}", expanded=True):
                     st.text(fc["content"])
@@ -1643,9 +1996,9 @@ with tab_batch:
     else:
         b_col1, b_col2 = st.columns([2, 2])
         with b_col1:
-            filter_b_c1 = st.selectbox("🔍 篩選檢視的來源主夾：", ["(顯示全部檔案)"] + list(folder_tree.keys()))
+            filter_b_c1 = st.selectbox("🔍 篩選來源主夾：", ["(顯示全部檔案)"] + list(folder_tree.keys()))
         with b_col2:
-            kw_filter_file = st.text_input("🔍 或輸入檔名關鍵字過濾：", placeholder="例如：0d版、契約...")
+            kw_filter_file = st.text_input("🔍 檔名關鍵字過濾：")
 
         display_files = sorted(list(file_info_map.keys()))
         if filter_b_c1 != "(顯示全部檔案)":
@@ -1653,7 +2006,6 @@ with tab_batch:
         if kw_filter_file.strip():
             display_files = [f for f in display_files if kw_filter_file.strip().lower() in f.lower()]
 
-        st.caption("👇 請在下方表格最左側 **打勾 `☑️` 選擇多份檔案**（亦可直接雙擊「檔案名稱」欄位修改檔名）：")
         table_data = []
         for f in display_files:
             fc1, fc2, fc3, fup = file_info_map[f]
@@ -1692,22 +2044,19 @@ with tab_batch:
                         for c in chunks:
                             if c["file_name"] == old_n:
                                 c["file_name"] = new_n
-                with st.spinner("💾 正在儲存並同步至 GitHub..."):
-                    save_db(db)
-                st.success("✅ 檔案名稱已批次更新！")
+                save_db(db)
                 st.rerun()
 
         st.divider()
-        st.markdown(f"##### 🚀 將已勾選的 **{len(selected_rows)}** 份檔案批次搬移或刪除：")
         m_col1, m_col2, m_col3, m_col4, m_col5 = st.columns([2, 2, 2, 2, 2])
         with m_col1:
-            dest_c1 = st.selectbox("目標第1層 (主夾)：", list(folder_tree.keys()), key="b_c1")
+            dest_c1 = st.selectbox("目標第1層：", list(folder_tree.keys()), key="b_c1")
         with m_col2:
-            dest_c2 = st.selectbox("目標第2層 (次夾)：", list(folder_tree[dest_c1].keys()), key="b_c2")
+            dest_c2 = st.selectbox("目標第2層：", list(folder_tree[dest_c1].keys()), key="b_c2")
         with m_col3:
             raw_b_c3 = folder_tree[dest_c1][dest_c2]
             b_c3_opts = ["(無細夾 / 直接放第二層)"] + (raw_b_c3 if isinstance(raw_b_c3, list) else [])
-            b_c3_sel = st.selectbox("目標第3層 (可選無)：", b_c3_opts, key="b_c3_sel")
+            b_c3_sel = st.selectbox("目標第3層：", b_c3_opts, key="b_c3_sel")
             dest_c3 = "" if b_c3_sel == "(無細夾 / 直接放第二層)" else b_c3_sel
         with m_col4:
             st.write("")
@@ -1716,17 +2065,12 @@ with tab_batch:
                 for c in chunks:
                     if c["file_name"] in sel_names:
                         c["cat1"], c["cat2"], c["cat3"] = dest_c1, dest_c2, dest_c3
-                with st.spinner("📦 正在搬移並同步至 GitHub..."):
-                    save_db(db)
-                dest_path_str = f"{dest_c1} > {dest_c2}" + (f" > {dest_c3}" if dest_c3 else "")
-                st.success(f"✅ 已將 {len(sel_names)} 份檔案成功搬移至【{dest_path_str}】！")
+                save_db(db)
                 st.rerun()
         with m_col5:
             st.write("")
             if st.button(f"🗑️ 批次刪除 ({len(selected_rows)} 份)", use_container_width=True, disabled=(len(selected_rows) == 0)):
                 sel_names = {r["_orig_name"] for r in selected_rows}
                 db["chunks"] = [c for c in chunks if c["file_name"] not in sel_names]
-                with st.spinner("🗑️ 正在刪除並同步至 GitHub..."):
-                    save_db(db)
-                st.success(f"🗑️ 已批次刪除 {len(sel_names)} 份檔案！")
+                save_db(db)
                 st.rerun()
